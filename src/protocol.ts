@@ -77,7 +77,28 @@ export type HostMessage =
   | { type: "billkit:change"; complete: boolean; method?: string }
   | { type: "billkit:redirect"; url: string }
   | { type: "billkit:success"; sessionId: string; paymentStatus: string }
+  /**
+   * Any terminal failure of the current attempt, routed to `onError`.
+   *
+   * `code` is a stable machine-readable tag; `message` is the
+   * human-readable text, already localised by the element. Codes the
+   * iframe sends:
+   *
+   * - `payment_declined` — the confirm came back with a failed
+   *   `payment_status` and no redirect. The element keeps its own retry
+   *   panel on screen, so treat this as "this attempt is over", not "the
+   *   session is dead": re-enable your pay button rather than navigating
+   *   away.
+   *
+   * The loader adds `load_timeout` and `unsafe_redirect` of its own; see
+   * `iframe.ts`. Unknown codes are always possible — a newer element can
+   * mint one — so branch on the ones you handle and fall through to
+   * `message` for the rest.
+   */
   | { type: "billkit:error"; message: string; code?: string };
+
+/** The `billkit:error` codes the element itself emits. */
+export const ELEMENT_ERROR_CODES = ["payment_declined"] as const;
 
 const HOST_MESSAGE_TYPES = new Set<HostMessage["type"]>([
   "billkit:ready",

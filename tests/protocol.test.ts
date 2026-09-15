@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_API_BASE,
   DEFAULT_IFRAME_ORIGIN,
+  ELEMENT_ERROR_CODES,
   isSafeRedirectUrl,
   parseHostMessage,
   sessionIdFromClientSecret,
@@ -65,6 +66,24 @@ describe("parseHostMessage", () => {
     expect(parseHostMessage({ type: "billkit:error", message: "x", code: 7 })).toEqual({
       type: "billkit:error",
       message: "x",
+    });
+  });
+
+  it("preserves the documented payment_declined code", () => {
+    // The element's only way of telling the host "this attempt is over"
+    // after a decline. Dropping the code would leave the merchant unable
+    // to tell a decline from a load failure.
+    expect(ELEMENT_ERROR_CODES).toContain("payment_declined");
+    expect(
+      parseHostMessage({
+        type: "billkit:error",
+        message: "Your bank didn't approve this payment.",
+        code: "payment_declined",
+      }),
+    ).toEqual({
+      type: "billkit:error",
+      message: "Your bank didn't approve this payment.",
+      code: "payment_declined",
     });
   });
 

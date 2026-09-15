@@ -136,7 +136,20 @@ export class ElementController implements BillKitElementHandle {
   private readonly onMessage: (event: MessageEvent) => void;
   private readonly logger: BillKitElementLogger;
   private destroyed = false;
+  private ready = false;
   private loadTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The theme the iframe should be showing.
+   *
+   * Seeded from the constructor options and replaced by every
+   * `updateTheme()` call, so the token set is stored in exactly one
+   * place. `sendInit` reads it rather than `options.theme`: the init
+   * handshake happens whenever the iframe finishes booting, which can be
+   * well after a caller has already switched themes (a dark-mode toggle
+   * fired during a slow bundle fetch), and replaying the constructor's
+   * theme there would repaint the element back to the stale one.
+   */
+  private theme: BillKitThemeTokens | undefined;
 
   constructor(
     target: HTMLElement | string,
@@ -153,6 +166,7 @@ export class ElementController implements BillKitElementHandle {
 
     this.kind = kind;
     this.options = options;
+    this.theme = options.theme;
     this.logger = options.logger ?? NOOP_ELEMENT_LOGGER;
     this.customerId = extra.customerId;
     this.origin = (options.iframeOrigin ?? DEFAULT_IFRAME_ORIGIN).replace(/\/$/, "");
@@ -266,6 +280,16 @@ export class ElementController implements BillKitElementHandle {
   private route(message: HostMessage): void {
     switch (message.type) {
       case "billkit:ready":
+        // `ready` is proof the iframe booted, which is the only thing the
+        // watchdog was ever guarding against. What follows — fetching the
+        // element bundle's session view over the network — can legitimately
+        // outlast `loadTimeoutMs` on a slow connection, and firing
+        // `load_timeout` then told the merchant the element had failed
+        // while a perfectly working form finished rendering underneath the
+        // error they had just shown. The never-boots case still times out,
+        // because it never gets here.
+        this.clearLoadTimer();
+        this.ready = true;
         this.logger.debug("BillKit element ready; sending init", { element: this.kind });
         this.sendInit();
         break;
@@ -334,7 +358,7 @@ export class ElementController implements BillKitElementHandle {
       sessionId: sessionIdFromClientSecret(this.options.clientSecret),
       apiBase: this.apiBase,
       loaderVersion: VERSION,
-      ...(this.options.theme ? { theme: this.options.theme } : {}),
+      ...(this.theme ? { theme: this.theme } : {}),
       ...(this.options.locale ? { locale: this.options.locale } : {}),
       ...(this.customerId ? { customerId: this.customerId } : {}),
     });
@@ -384,8 +408,20 @@ export class ElementController implements BillKitElementHandle {
     this.post({ type: "billkit:submit" });
   }
 
+  /**
+   * Push new theme tokens into the element.
+   *
+   * Safe to call at any point in the lifecycle, including before the
+   * iframe has booted. A pre-`ready` call used to be posted into a frame
+   * with no listener yet and silently dropped, and then `init` replayed
+   * the *constructor's* theme over the top — so mounting in light mode
+   * and immediately switching to dark left a light element. Storing the
+   * tokens is what makes the call stick; the post is the fast path for
+   * an element already on screen.
+   */
   updateTheme(theme: BillKitThemeTokens): void {
-    this.post({ type: "billkit:theme", theme });
+    this.theme = theme;
+    if (this.ready) this.post({ type: "billkit:theme", theme });
   }
 
   destroy(): void {

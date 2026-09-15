@@ -207,6 +207,91 @@ describe("mountCheckoutElement", () => {
     }
   });
 
+  it("cancels the load watchdog on ready, before the element finishes loading", () => {
+    // The iframe booting is what the watchdog guards; fetching the
+    // element view afterwards can legitimately outrun `loadTimeoutMs` on
+    // a slow connection. Firing `load_timeout` there showed an error over
+    // a form that was about to render perfectly well.
+    vi.useFakeTimers();
+    try {
+      const onError = vi.fn();
+      const onReady = vi.fn();
+      mountCheckoutElement("#checkout", {
+        clientSecret: CS,
+        onError,
+        onReady,
+        loadTimeoutMs: 5000,
+      });
+      const iframe = getIframe(host);
+
+      vi.advanceTimersByTime(1000);
+      fromIframe(iframe, { type: "billkit:ready" });
+      // Well past the deadline, with `loaded` only arriving now.
+      vi.advanceTimersByTime(30_000);
+      fromIframe(iframe, { type: "billkit:loaded", sessionId: "cs_1" });
+
+      expect(onError).not.toHaveBeenCalled();
+      expect(onReady).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("routes a payment_declined error to onError", () => {
+    const onError = vi.fn();
+    const onSuccess = vi.fn();
+    mountCheckoutElement("#checkout", { clientSecret: CS, onError, onSuccess });
+    const iframe = getIframe(host);
+
+    fromIframe(iframe, {
+      type: "billkit:error",
+      message: "Your bank didn't approve this payment.",
+      code: "payment_declined",
+    });
+
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith({
+      message: "Your bank didn't approve this payment.",
+      code: "payment_declined",
+    });
+  });
+
+  it("carries the LATEST theme in init when updateTheme() runs before ready", () => {
+    const handle = mountCheckoutElement("#checkout", {
+      clientSecret: CS,
+      theme: { colorScheme: "light" },
+    });
+    const iframe = getIframe(host);
+    const post = vi.spyOn(iframe.contentWindow as Window, "postMessage");
+
+    // The tenant flips to dark while the bundle is still downloading.
+    handle.updateTheme({ colorScheme: "dark" });
+    // Nothing is posted yet — there is no listener in the frame to hear it.
+    expect(post).not.toHaveBeenCalled();
+
+    fromIframe(iframe, { type: "billkit:ready" });
+
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0]![0]).toMatchObject({
+      type: "billkit:init",
+      theme: { colorScheme: "dark" },
+    });
+  });
+
+  it("posts billkit:theme immediately once the element is ready", () => {
+    const handle = mountCheckoutElement("#checkout", { clientSecret: CS });
+    const iframe = getIframe(host);
+    fromIframe(iframe, { type: "billkit:ready" });
+    const post = vi.spyOn(iframe.contentWindow as Window, "postMessage");
+
+    handle.updateTheme({ colorPrimary: "#0f766e" });
+
+    expect(post).toHaveBeenCalledWith(
+      { type: "billkit:theme", theme: { colorPrimary: "#0f766e" } },
+      DEFAULT_IFRAME_ORIGIN,
+    );
+  });
+
   it("stops routing and removes the iframe after destroy()", () => {
     const onSuccess = vi.fn();
     const handle = mountCheckoutElement("#checkout", { clientSecret: CS, onSuccess });

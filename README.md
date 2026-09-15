@@ -27,6 +27,7 @@ const session = await client.checkoutSessions.create<{ client_secret: string }>(
   price_id: "price_123",
   ui_mode: "embedded",
   success_url: "https://example.com/thanks",
+  cancel_url: "https://example.com/pricing", // required, even when embedded
 });
 // hand session.client_secret to the browser
 ```
@@ -86,10 +87,36 @@ Both elements take the same base options.
 | `onReady` | `() => void` | The iframe booted and loaded the session. |
 | `onChange` | `(e: ChangeEvent) => void` | Fires as the customer edits. `e.complete` drives an external pay button. |
 | `onSuccess` | `(e: SuccessEvent) => void` | Terminal success with no redirect. |
-| `onError` | `(e: BillKitElementError) => void` | Any element or payment error. |
+| `onError` | `(e: BillKitElementError) => void` | Any element or payment error. See [Error codes](#error-codes). |
 | `onRedirect` | `(url: string) => boolean \| void` | Called before the top window navigates for 3DS or iDEAL. Return `false` to navigate yourself. |
 
 `mountPaymentMethodElement` additionally requires `customerId`.
+
+### Error codes
+
+`onError` receives `{ message, code? }`. `message` is human-readable and already localised; `code` is the stable tag to branch on.
+
+| `code` | Raised by | What to do |
+|---|---|---|
+| `payment_declined` | The element, after a confirm that failed with no redirect. | Re-enable your pay button. The element keeps its own retry panel on screen, so the buyer can pick another method without leaving the page. Do **not** navigate away. |
+| `load_timeout` | The loader, when the iframe never booted within `loadTimeoutMs`. | Check CSP `frame-src` and ad blockers; offer the hosted checkout as a fallback. |
+| `unsafe_redirect` | The loader, refusing a redirect target that was not absolute `http(s)`. | Should never happen in production. Treat it as a security event. |
+
+Unknown codes are always possible — a newer element can mint one — so branch on what you handle and fall through to `message` for the rest.
+
+If you drive an external pay button, `payment_declined` is what re-enables it. Without handling it the button stays in its submitting state forever, because a decline fires neither `onSuccess` nor a redirect:
+
+```ts
+const element = mountCheckoutElement("#checkout", {
+  clientSecret,
+  onChange: ({ complete }) => (payButton.disabled = !complete),
+  onError: ({ code, message }) => {
+    payButton.disabled = false; // the attempt is over, whatever the cause
+    if (code !== "payment_declined") showToast(message);
+  },
+});
+payButton.onclick = () => element.submit();
+```
 
 ### Redirect-based methods
 

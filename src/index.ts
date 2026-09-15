@@ -30,6 +30,7 @@ export type { BillKitThemeTokens } from "./theme";
 export {
   DEFAULT_API_BASE,
   DEFAULT_IFRAME_ORIGIN,
+  ELEMENT_ERROR_CODES,
   isSafeRedirectUrl,
   sessionIdFromClientSecret,
   type ClientMessage,

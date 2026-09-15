@@ -23,7 +23,12 @@ export interface BillKitThemeTokens {
   fontFamily?: string;
   /** Corner radius for inputs, tiles, and the pay button. */
   borderRadius?: string;
-  /** Base spacing unit the element scales its paddings from. */
+  /**
+   * Base spacing unit the element scales its paddings and the gap
+   * between its fields from. Default `"4px"`; clamped to 1–16px, and
+   * `px` only (`rem`/`em` would resolve against the iframe's root font
+   * size, not your page's, so they would not mean what you meant).
+   */
   spacingUnit?: string;
   /** `"light"` | `"dark"`; seeds the iframe's default palette. */
   colorScheme?: "light" | "dark";
