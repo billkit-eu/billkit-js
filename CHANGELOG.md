@@ -9,6 +9,26 @@ Versioned independently of the server SDKs. `@billkit-eu/react` tracks this
 package through a peer dependency, so a breaking change here is a breaking
 change there.
 
+## [0.2.2]
+
+### Added
+- `element_crashed` in `ELEMENT_ERROR_CODES`. The element now reports an
+  unrecoverable render error to the host instead of failing silently: it
+  replaces itself with an error pane and posts
+  `onError({ code: "element_crashed" })`. Nothing was charged, and a reload is
+  the only recovery, so **re-enable your pay button and stop waiting** — the
+  same handling `payment_declined` already needs.
+
+  Previously a crashed element was a blank iframe and `onError` never fired,
+  which left the merchant's own pay button spinning forever. That is the
+  failure this closes.
+
+  `ELEMENT_ERROR_CODES` is not exhaustive at runtime: `code` is passed through
+  verbatim, so branch on the ones you handle and fall back to `message`.
+
+No API change: this is a new value in an existing union, reported through the
+`onError` callback you already have.
+
 ## [0.2.1]
 
 ### Changed

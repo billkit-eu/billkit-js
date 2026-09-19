@@ -99,6 +99,7 @@ Both elements take the same base options.
 | `code` | Raised by | What to do |
 |---|---|---|
 | `payment_declined` | The element, after a confirm that failed with no redirect. | Re-enable your pay button. The element keeps its own retry panel on screen, so the buyer can pick another method without leaving the page. Do **not** navigate away. |
+| `element_crashed` | The element, after an unrecoverable render error. It replaces itself with an error pane. | Nothing was charged. Re-enable your pay button and stop waiting; only a reload recovers the element, so offer the hosted checkout as a fallback. |
 | `load_timeout` | The loader, when the iframe never booted within `loadTimeoutMs`. | Check CSP `frame-src` and ad blockers; offer the hosted checkout as a fallback. |
 | `unsafe_redirect` | The loader, refusing a redirect target that was not absolute `http(s)`. | Should never happen in production. Treat it as a security event. |
 

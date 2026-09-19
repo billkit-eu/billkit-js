@@ -97,8 +97,19 @@ export type HostMessage =
    */
   | { type: "billkit:error"; message: string; code?: string };
 
-/** The `billkit:error` codes the element itself emits. */
-export const ELEMENT_ERROR_CODES = ["payment_declined"] as const;
+/**
+ * The `billkit:error` codes the element itself emits.
+ *
+ * - `payment_declined` — the confirm came back unpaid. The element keeps
+ *   its own retry panel up, so re-enable your button rather than navigate.
+ * - `element_crashed` — the element hit an unrecoverable render error and
+ *   replaced itself with an error pane. Nothing was charged, and only a
+ *   reload recovers it, so re-enable your button and stop waiting.
+ *
+ * Not exhaustive at runtime: `code` is passed through verbatim, so branch
+ * on the ones you handle and fall back to `message`.
+ */
+export const ELEMENT_ERROR_CODES = ["payment_declined", "element_crashed"] as const;
 
 const HOST_MESSAGE_TYPES = new Set<HostMessage["type"]>([
   "billkit:ready",
