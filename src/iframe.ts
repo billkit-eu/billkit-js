@@ -39,6 +39,17 @@ export interface BaseElementOptions {
   /** BCP-47 locale, e.g. `"nl"`. Defaults to the customer's browser. */
   locale?: string;
   /**
+   * Accessible name for the element's `<iframe>`, announced by screen
+   * readers as they move through your page.
+   *
+   * Defaults to "BillKit secure checkout" / "BillKit saved payment
+   * methods" per element kind. Those defaults are English, and the frame
+   * title is the one string of ours that lives on YOUR page rather than
+   * inside the element, so it is the one `locale` cannot reach. Set it
+   * when the rest of your page is not in English.
+   */
+  title?: string;
+  /**
    * Origin the element iframe is served from. Defaults to the BillKit-
    * hosted `https://js.billkit.eu`. Overriding it is the seam for a
    * future tenant custom-domain (CNAME) that BillKit still operates:
@@ -86,12 +97,51 @@ export interface BaseElementOptions {
 
 /** Handle returned from every mount, to control the element afterwards. */
 export interface BillKitElementHandle {
-  /** Ask the iframe to submit the current form (external pay button). */
+  /**
+   * Ask the iframe to submit the current form (external pay button).
+   *
+   * Safe to call before the element has booted: one pending submit is
+   * queued and flushed as soon as the `ready`→`init` handshake completes.
+   */
   submit(): void;
+  /**
+   * Move keyboard focus into the element, onto the first control of
+   * whatever it is currently showing.
+   *
+   * For a page that reveals the element in a step or a drawer: focus has
+   * to cross the iframe boundary deliberately, because your page cannot
+   * reach inside a cross-origin frame to do it. A call before the element
+   * has booted is dropped rather than queued: there is nothing to focus
+   * yet, and the buyer will have moved on by the time there is.
+   */
+  focus(): void;
   /** Push new theme tokens into a mounted element. */
   updateTheme(theme: BillKitThemeTokens): void;
   /** Tear down: remove the iframe and detach all listeners. */
   destroy(): void;
+}
+
+/** The iframe's default accessible name, per element kind. */
+const DEFAULT_IFRAME_TITLE: Record<ElementKind, string> = {
+  checkout: "BillKit secure checkout",
+  "payment-method": "BillKit saved payment methods",
+};
+
+/**
+ * Marks an iframe as ours, so a second mount into the same container can
+ * be spotted. A `data-` attribute rather than a class: a merchant's own
+ * stylesheet will not collide with it, and it survives their CSS reset.
+ */
+const ELEMENT_MARKER = "data-billkit-element";
+
+/**
+ * A mount target, named well enough to find in a template, and nothing
+ * more. Selector strings are the merchant's own, and an id is the only
+ * thing worth echoing back from a resolved node.
+ */
+function describeTarget(target: HTMLElement | string): string {
+  if (typeof target === "string") return target;
+  return target.id ? `#${target.id}` : target.tagName.toLowerCase();
 }
 
 /**
@@ -139,6 +189,19 @@ export class ElementController implements BillKitElementHandle {
   private ready = false;
   private loadTimer: ReturnType<typeof setTimeout> | null = null;
   /**
+   * A `submit()` that arrived before the iframe could hear it.
+   *
+   * Posting into a frame with no listener yet is a silent drop, and the
+   * shape that produces it is ordinary: a merchant's own pay button is
+   * clickable the moment their page renders, which can be well before a
+   * third-party frame has booted. The buyer pressed pay and nothing
+   * happened, with no callback to say why.
+   *
+   * One pending call, not a queue: a second press before boot means the
+   * same intent, not a second payment.
+   */
+  private pendingSubmit = false;
+  /**
    * The theme the iframe should be showing.
    *
    * Seeded from the constructor options and replaced by every
@@ -173,6 +236,20 @@ export class ElementController implements BillKitElementHandle {
     this.apiBase = (options.apiBase ?? DEFAULT_API_BASE).replace(/\/$/, "");
 
     const mountPoint = resolveTarget(target);
+    if (mountPoint.querySelector(`iframe[${ELEMENT_MARKER}]`) !== null) {
+      // Warned, not thrown. A duplicate mount is almost always a SPA that
+      // re-ran an effect without calling `destroy()`, and the second
+      // element does work: it just sits under the first one, with two
+      // `message` listeners on `window` racing for the same traffic and a
+      // container that is now twice as tall. Throwing would take down a
+      // page that was otherwise about to take a payment; saying so loudly
+      // in the logger is the proportionate answer.
+      this.logger.warn("BillKit mounted a second element into a target that already had one", {
+        element: this.kind,
+        target: describeTarget(target),
+        hint: "call destroy() on the first element before mounting another into the same node",
+      });
+    }
     this.iframe = this.createIframe();
     mountPoint.appendChild(this.iframe);
     this.logger.debug("BillKit element mounting", {
@@ -198,7 +275,13 @@ export class ElementController implements BillKitElementHandle {
     // No secret in the URL. The client_secret is delivered over
     // postMessage after the ready handshake.
     iframe.src = `${this.origin}${path}`;
-    iframe.title = "BillKit secure checkout";
+    // The frame's accessible name. Per kind, because "secure checkout" on
+    // a saved-methods wallet describes a payment the customer is not
+    // making, and overridable, because this string lives on the
+    // merchant's page and so is the one piece of element copy `locale`
+    // cannot reach.
+    iframe.title = this.options.title ?? DEFAULT_IFRAME_TITLE[this.kind];
+    iframe.setAttribute(ELEMENT_MARKER, this.kind);
     iframe.setAttribute("allow", "payment");
     // Defence in depth. The frame is already cross-origin, so the
     // same-origin policy stops it reaching into the merchant's page; the
@@ -229,6 +312,12 @@ export class ElementController implements BillKitElementHandle {
     );
     iframe.setAttribute("loading", "eager");
     iframe.style.border = "0";
+    // An iframe is `display: inline` by default, so it sits on the text
+    // baseline and the line-box leaves a few pixels of descender space
+    // under it. On a merchant's page that reads as a stray gap below the
+    // payment form that no amount of margin on their container removes,
+    // because it is inside ours.
+    iframe.style.display = "block";
     iframe.style.width = "100%";
     iframe.style.minHeight = "120px";
     iframe.style.colorScheme = "normal";
@@ -362,6 +451,13 @@ export class ElementController implements BillKitElementHandle {
       ...(this.options.locale ? { locale: this.options.locale } : {}),
       ...(this.customerId ? { customerId: this.customerId } : {}),
     });
+    if (this.pendingSubmit) {
+      this.pendingSubmit = false;
+      this.logger.debug("BillKit flushing the submit queued before ready", {
+        element: this.kind,
+      });
+      this.post({ type: "billkit:submit" });
+    }
   }
 
   private handleRedirect(url: string): void {
@@ -404,8 +500,42 @@ export class ElementController implements BillKitElementHandle {
     }
   }
 
+  /**
+   * Submit the element's current form.
+   *
+   * Before the `ready`→`init` handshake the frame has no listener, so the
+   * message is queued and flushed the moment `init` goes out. The element
+   * still decides whether it can act on it: a submit that reaches it
+   * before its session view has finished loading is ignored there, and the
+   * buyer presses pay again, which is the right outcome, and a long way
+   * from the silent drop this replaces.
+   */
   submit(): void {
+    if (!this.ready) {
+      this.pendingSubmit = true;
+      this.logger.debug("BillKit queued a submit until the element is ready", {
+        element: this.kind,
+      });
+      return;
+    }
     this.post({ type: "billkit:submit" });
+  }
+
+  /**
+   * Move keyboard focus into the element.
+   *
+   * Not queued, unlike `submit()`: focus is about where the buyer is
+   * looking right now, and replaying it after a slow boot would yank the
+   * caret out of whatever they had started typing on the host page.
+   */
+  focus(): void {
+    if (!this.ready) {
+      this.logger.debug("BillKit dropped a focus() call made before the element was ready", {
+        element: this.kind,
+      });
+      return;
+    }
+    this.post({ type: "billkit:focus" });
   }
 
   /**

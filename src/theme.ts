@@ -30,6 +30,15 @@ export interface BillKitThemeTokens {
    * size, not your page's, so they would not mean what you meant).
    */
   spacingUnit?: string;
-  /** `"light"` | `"dark"`; seeds the iframe's default palette. */
-  colorScheme?: "light" | "dark";
+  /**
+   * Which palette the element paints: `"light"`, `"dark"`, or `"auto"` to
+   * follow the buyer's own `prefers-color-scheme` and keep following it if
+   * they change it mid-checkout.
+   *
+   * `"auto"` was added in 0.3.0. An element older than the release that
+   * understood it treats the value as unrecognised and keeps its light
+   * default, so the option degrades to today's behaviour rather than
+   * failing.
+   */
+  colorScheme?: "light" | "dark" | "auto";
 }

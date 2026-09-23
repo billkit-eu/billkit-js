@@ -67,7 +67,19 @@ export type ClientMessage =
       customerId?: string;
     }
   | { type: "billkit:theme"; theme: BillKitThemeTokens }
-  | { type: "billkit:submit" };
+  | { type: "billkit:submit" }
+  /**
+   * Ask the element to move keyboard focus to the first control of
+   * whatever it is currently showing (the first field on the form, the
+   * retry button on the declined panel).
+   *
+   * Added in loader 0.3.0. An element older than the release that
+   * understood it drops the message in `parseInboundMessage`, so the call
+   * is a no-op there rather than a failure, which is also why the iframe
+   * had to ship this first. See DEVELOPMENT.md, "The protocol is a
+   * contract with a separate deployment".
+   */
+  | { type: "billkit:focus" };
 
 /** Messages the iframe sends OUT to the loader. */
 export type HostMessage =
@@ -75,6 +87,18 @@ export type HostMessage =
   | { type: "billkit:resize"; height: number }
   | { type: "billkit:loaded"; sessionId: string }
   | { type: "billkit:change"; complete: boolean; method?: string }
+  /**
+   * Hand the top window to the provider (3DS / iDEAL / PayPal).
+   *
+   * **`url` is UNCHECKED here.** `parseHostMessage` asserts only that it
+   * is a non-empty string; the scheme guard lives at the navigation site,
+   * in `ElementController.handleRedirect`, which calls `isSafeRedirectUrl`
+   * immediately before `location.assign` and otherwise refuses with
+   * `onError({ code: "unsafe_redirect" })`. That single call site is the
+   * whole invariant, so `handleRedirect` must stay the only consumer of
+   * this message: a second one would be a second path to `location`
+   * carrying no guard of its own.
+   */
   | { type: "billkit:redirect"; url: string }
   | { type: "billkit:success"; sessionId: string; paymentStatus: string }
   /**
@@ -105,11 +129,29 @@ export type HostMessage =
  * - `element_crashed` — the element hit an unrecoverable render error and
  *   replaced itself with an error pane. Nothing was charged, and only a
  *   reload recovers it, so re-enable your button and stop waiting.
+ * - `no_payment_methods`: nothing the tenant enabled is payable for this
+ *   session's currency and the buyer's country. The element refuses to
+ *   draw a form rather than show one whose `/confirm` would be rejected.
+ *   Nothing was charged and a retry changes nothing: send the buyer to a
+ *   surface that can take the payment, and check the price's method
+ *   allowlist.
+ * - `missing_session_id`: the loader sent a `client_secret` it could not
+ *   parse a session id out of. An integration bug, not a buyer one: check
+ *   that the secret is the whole `<sessionId>_secret_…` value from
+ *   `POST /v1/checkout/sessions`, unmodified.
+ * - `missing_client_secret`: the payment-method element was initialised
+ *   without a secret at all. Same class: nothing to retry, fix the mount.
  *
  * Not exhaustive at runtime: `code` is passed through verbatim, so branch
  * on the ones you handle and fall back to `message`.
  */
-export const ELEMENT_ERROR_CODES = ["payment_declined", "element_crashed"] as const;
+export const ELEMENT_ERROR_CODES = [
+  "payment_declined",
+  "element_crashed",
+  "no_payment_methods",
+  "missing_session_id",
+  "missing_client_secret",
+] as const;
 
 const HOST_MESSAGE_TYPES = new Set<HostMessage["type"]>([
   "billkit:ready",
@@ -202,7 +244,18 @@ export function parseHostMessage(data: unknown): HostMessage | null {
     }
 
     case "billkit:redirect": {
-      if (!isSafeRedirectUrl(candidate["url"])) return null;
+      // Shape only: any non-empty string is a well-formed *message*, and
+      // whether it is a safe *target* is decided at the navigation site.
+      //
+      // This used to call `isSafeRedirectUrl` and return null, which made
+      // the documented `onError({ code: "unsafe_redirect" })` unreachable:
+      // the refusal branch in `ElementController.handleRedirect` could
+      // never run, and a merchant saw nothing but a "dropped a malformed
+      // message" logger line, on the one event that is a security
+      // refusal rather than a version skew. The guard itself did not move;
+      // `handleRedirect` still re-checks before `location.assign`, which
+      // is the line that matters.
+      if (typeof candidate["url"] !== "string" || candidate["url"] === "") return null;
       return { type: "billkit:redirect", url: candidate["url"] };
     }
 

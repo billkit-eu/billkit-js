@@ -96,26 +96,51 @@ describe("parseHostMessage", () => {
     });
   });
 
-  it("refuses a redirect to anything that isn't absolute http(s)", () => {
-    // The loader navigates the TOP window with this value, so a
-    // `javascript:` URL would execute in the *merchant's* origin, turning
-    // an XSS confined to the element document into an SOP escape.
+  it("parses a redirect by SHAPE only, leaving the scheme to handleRedirect", () => {
+    // Deliberately NOT a scheme check. This used to call
+    // `isSafeRedirectUrl` and return null for anything else, which made
+    // the documented `onError({ code: "unsafe_redirect" })` unreachable:
+    // the refusal branch in `handleRedirect` never ran, and the merchant
+    // got a "dropped a malformed message" logger line instead, on the
+    // one event that is a security refusal rather than a version skew.
+    //
+    // The guarantee did not move: `handleRedirect` re-checks immediately
+    // before `location.assign`, and `checkout-element.test.ts` pins that
+    // none of these ever reach it.
     for (const url of [
       "javascript:alert(document.domain)",
       "data:text/html,<script>alert(1)</script>",
       "vbscript:msgbox(1)",
       "file:///etc/passwd",
       "/relative/path",
-      "",
-      42,
-      null,
     ]) {
+      expect(parseHostMessage({ type: "billkit:redirect", url })).toEqual({
+        type: "billkit:redirect",
+        url,
+      });
+    }
+    // A non-string or empty url is still not a message at all.
+    for (const url of ["", 42, null, undefined, {}]) {
       expect(parseHostMessage({ type: "billkit:redirect", url })).toBeNull();
     }
     expect(parseHostMessage({ type: "billkit:redirect", url: "https://mollie.com/x" })).toEqual({
       type: "billkit:redirect",
       url: "https://mollie.com/x",
     });
+  });
+
+  it("carries the codes the element can emit", () => {
+    // The element emits five, and `ELEMENT_ERROR_CODES` listed two of
+    // them, so three real outcomes (`no_payment_methods`,
+    // `missing_session_id`, `missing_client_secret`) reached merchants
+    // as codes documented nowhere.
+    expect([...ELEMENT_ERROR_CODES]).toEqual([
+      "payment_declined",
+      "element_crashed",
+      "no_payment_methods",
+      "missing_session_id",
+      "missing_client_secret",
+    ]);
   });
 });
 

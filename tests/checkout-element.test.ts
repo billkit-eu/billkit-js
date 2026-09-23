@@ -13,6 +13,35 @@ function getIframe(host: HTMLElement): HTMLIFrameElement {
   return iframe;
 }
 
+/**
+ * Intercept the loader's top-window navigation, and hand back the undo.
+ *
+ * `handleRedirect` calls `(window.top ?? window).location.assign(url)`,
+ * so replacing `window.top` with a stand-in whose `location.assign` is a
+ * spy captures the navigation without performing it. `window.location`
+ * itself cannot be stubbed: its members are `[LegacyUnforgeable]` and
+ * jsdom refuses the redefinition, which is why the top window is the
+ * seam. The `catch` fallback to `window.location` is covered by the
+ * logger assertions instead: the "redirecting the top window" debug line
+ * sits immediately before the `assign`, on the far side of the guard, so
+ * its absence is proof the guard refused before either branch ran.
+ */
+function stubTopNavigation(spy: (url: string) => void): () => void {
+  const original = window.top;
+  Object.defineProperty(window, "top", {
+    configurable: true,
+    writable: true,
+    value: { location: { assign: spy } },
+  });
+  return () => {
+    Object.defineProperty(window, "top", {
+      configurable: true,
+      writable: true,
+      value: original,
+    });
+  };
+}
+
 /** Dispatch a message as if it came from the element iframe. */
 function fromIframe(
   iframe: HTMLIFrameElement,
@@ -290,6 +319,207 @@ describe("mountCheckoutElement", () => {
       { type: "billkit:theme", theme: { colorPrimary: "#0f766e" } },
       DEFAULT_IFRAME_ORIGIN,
     );
+  });
+
+  it("fires onError(unsafe_redirect) and never navigates, for every unsafe target", () => {
+    // THE invariant. `parseHostMessage` checks the redirect's shape and
+    // nothing more, so the guarantee that only http(s) reaches
+    // `location.assign` rests entirely on `handleRedirect`'s call to
+    // `isSafeRedirectUrl`. If that call were ever dropped, a
+    // `javascript:` URL arriving over postMessage would execute in the
+    // MERCHANT's origin, an element-scoped XSS escalated into a
+    // same-origin-policy escape onto every page hosting the element.
+    //
+    // So this asserts the negative directly: `assign` is never reached.
+    const unsafe = [
+      "javascript:alert(document.domain)",
+      "data:text/html,<script>alert(1)</script>",
+      "vbscript:msgbox(1)",
+      "/relative/path",
+      "",
+    ];
+
+    for (const url of unsafe) {
+      const onError = vi.fn();
+      const onRedirect = vi.fn();
+      const warn = vi.fn();
+      const debug = vi.fn();
+      const assign = vi.fn();
+      const restoreTop = stubTopNavigation(assign);
+
+      try {
+        mountCheckoutElement("#checkout", {
+          clientSecret: CS,
+          onError,
+          onRedirect,
+          logger: { debug, warn },
+        });
+        const iframe = getIframe(host);
+
+        fromIframe(iframe, { type: "billkit:redirect", url });
+
+        expect(assign, `navigated to ${JSON.stringify(url)}`).not.toHaveBeenCalled();
+        // Covers the `catch` branch too, which falls back to
+        // `window.location` and cannot be stubbed under jsdom: this debug
+        // line is the last statement before either `assign`, so if it
+        // never ran, neither did they.
+        expect(debug).not.toHaveBeenCalledWith(
+          "BillKit redirecting the top window",
+          expect.anything(),
+        );
+        // An empty url is dropped by the parser as a malformed message, so
+        // it never reaches the refusal at all, which is also correct, and
+        // the reason this asserts on navigation first.
+        if (url !== "") {
+          expect(onError).toHaveBeenCalledWith({
+            message: "Refused to follow an unsafe redirect target.",
+            code: "unsafe_redirect",
+          });
+          expect(warn).toHaveBeenCalledWith(
+            "BillKit refused an unsafe redirect",
+            expect.objectContaining({ element: "checkout" }),
+          );
+          // The refusal comes BEFORE the tenant's interception hook: a
+          // merchant must never be handed a `javascript:` URL to navigate
+          // to themselves.
+          expect(onRedirect).not.toHaveBeenCalled();
+        }
+      } finally {
+        restoreTop();
+        document.body.innerHTML = "";
+        host = document.createElement("div");
+        host.id = "checkout";
+        document.body.appendChild(host);
+      }
+    }
+  });
+
+  it("navigates for an http(s) target, which is the same code path", () => {
+    // The positive half: the guard refuses, it does not refuse
+    // everything. Without this the test above would pass against a
+    // `handleRedirect` that had stopped navigating altogether.
+    const assign = vi.fn();
+    const restoreTop = stubTopNavigation(assign);
+    try {
+      mountCheckoutElement("#checkout", { clientSecret: CS });
+      fromIframe(getIframe(host), {
+        type: "billkit:redirect",
+        url: "https://www.mollie.com/checkout/3ds/x",
+      });
+      expect(assign).toHaveBeenCalledWith("https://www.mollie.com/checkout/3ds/x");
+    } finally {
+      restoreTop();
+    }
+  });
+
+  it("titles the frame per element kind, and lets a merchant localise it", () => {
+    // The frame title is announced as focus crosses into the element and
+    // is the one string of ours that lives on the merchant's page, so
+    // `locale` cannot reach it. "Secure checkout" on a saved-methods
+    // wallet also described a payment the customer was not making.
+    mountCheckoutElement("#checkout", { clientSecret: CS });
+    expect(getIframe(host).title).toBe("BillKit secure checkout");
+
+    document.body.innerHTML = "";
+    const methods = document.createElement("div");
+    methods.id = "methods";
+    document.body.appendChild(methods);
+    mountPaymentMethodElement(methods, { clientSecret: CS, customerId: "cus_1" });
+    expect(getIframe(methods).title).toBe("BillKit saved payment methods");
+
+    methods.innerHTML = "";
+    mountPaymentMethodElement(methods, {
+      clientSecret: CS,
+      customerId: "cus_1",
+      title: "Opgeslagen betaalmethoden",
+    });
+    expect(getIframe(methods).title).toBe("Opgeslagen betaalmethoden");
+  });
+
+  it("lays the iframe out as a block", () => {
+    // An inline iframe sits on the text baseline, so the line box leaves
+    // descender space under it, a stray gap below the payment form on
+    // the merchant's page that no margin of theirs can remove.
+    mountCheckoutElement("#checkout", { clientSecret: CS });
+    expect(getIframe(host).style.display).toBe("block");
+  });
+
+  it("queues a submit made before ready and flushes it after init", () => {
+    // A merchant's own pay button is clickable the moment their page
+    // renders, which can be long before a third-party frame has booted.
+    // That submit used to be posted into a frame with no listener and
+    // dropped in silence: the buyer pressed pay and nothing happened.
+    const debug = vi.fn();
+    const handle = mountCheckoutElement("#checkout", { clientSecret: CS, logger: { debug, warn: vi.fn() } });
+    const iframe = getIframe(host);
+    const post = vi.spyOn(iframe.contentWindow as Window, "postMessage");
+
+    handle.submit();
+    expect(post).not.toHaveBeenCalled();
+    expect(debug).toHaveBeenCalledWith(
+      "BillKit queued a submit until the element is ready",
+      expect.anything(),
+    );
+
+    fromIframe(iframe, { type: "billkit:ready" });
+
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(post.mock.calls[0]![0]).toMatchObject({ type: "billkit:init" });
+    expect(post.mock.calls[1]![0]).toEqual({ type: "billkit:submit" });
+    expect(post.mock.calls[1]![1]).toBe(DEFAULT_IFRAME_ORIGIN);
+  });
+
+  it("queues at most one pending submit", () => {
+    // Two presses before boot are the same intent, not two payments.
+    const handle = mountCheckoutElement("#checkout", { clientSecret: CS });
+    const iframe = getIframe(host);
+    const post = vi.spyOn(iframe.contentWindow as Window, "postMessage");
+
+    handle.submit();
+    handle.submit();
+    handle.submit();
+    fromIframe(iframe, { type: "billkit:ready" });
+
+    const submits = post.mock.calls.filter(
+      ([message]) => (message as { type: string }).type === "billkit:submit",
+    );
+    expect(submits).toHaveLength(1);
+  });
+
+  it("posts billkit:focus once ready, and drops a focus() made before", () => {
+    // Not queued, unlike submit: focus is about where the buyer is
+    // looking now, and replaying it after a slow boot would pull the
+    // caret out of whatever they had started typing on the host page.
+    const debug = vi.fn();
+    const handle = mountCheckoutElement("#checkout", { clientSecret: CS, logger: { debug, warn: vi.fn() } });
+    const iframe = getIframe(host);
+    const early = vi.spyOn(iframe.contentWindow as Window, "postMessage");
+
+    handle.focus();
+    expect(early).not.toHaveBeenCalled();
+
+    fromIframe(iframe, { type: "billkit:ready" });
+    early.mockClear();
+    handle.focus();
+
+    expect(early).toHaveBeenCalledWith({ type: "billkit:focus" }, DEFAULT_IFRAME_ORIGIN);
+  });
+
+  it("warns when a second element is mounted into the same target", () => {
+    // Warned, not thrown: the second element works, it just stacks under
+    // the first with two `message` listeners racing for the same
+    // traffic. Throwing would take down a page about to take a payment.
+    const warn = vi.fn();
+    mountCheckoutElement("#checkout", { clientSecret: CS, logger: { debug: vi.fn(), warn } });
+    expect(warn).not.toHaveBeenCalled();
+
+    mountCheckoutElement("#checkout", { clientSecret: CS, logger: { debug: vi.fn(), warn } });
+
+    expect(warn).toHaveBeenCalledWith(
+      "BillKit mounted a second element into a target that already had one",
+      expect.objectContaining({ target: "#checkout" }),
+    );
+    expect(host.querySelectorAll("iframe")).toHaveLength(2);
   });
 
   it("stops routing and removes the iframe after destroy()", () => {

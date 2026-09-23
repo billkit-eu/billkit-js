@@ -51,9 +51,26 @@ const element = mountCheckoutElement("#checkout", {
 
 ```ts
 element.submit();                                  // submit from your own pay button
+element.focus();                                   // move the keyboard into the element
 element.updateTheme({ colorPrimary: "#0f766e" });  // restyle in place
 element.destroy();                                 // remove the iframe, detach listeners
 ```
+
+`submit()` is safe to call before the element has booted: one pending submit
+is queued and flushed as soon as the handshake completes, so a pay button
+that is clickable the moment your page renders no longer drops the click in
+silence. (The element still decides whether it can act on it; a submit that
+arrives before its session view has loaded is ignored there, and the buyer
+presses again.)
+
+`focus()` moves the keyboard into the element, onto the first control of
+whatever it is showing, the first field on the form, the retry button on the
+declined panel. Your page cannot reach inside a cross-origin frame to do that
+itself, which is why it has to ask. Use it when the element is revealed by a
+step or a drawer. A call made before the element has booted is dropped rather
+than queued: by the time it boots the buyer has moved on, and yanking the
+caret out of whatever they had started typing would be worse than doing
+nothing.
 
 Always call `destroy()` when you tear down the surrounding view. A live element holds a `message` listener on `window`.
 
@@ -79,7 +96,8 @@ Both elements take the same base options.
 |---|---|---|
 | `clientSecret` | `string` | Required. The `<sessionId>_secret_...` value from `POST /v1/checkout/sessions` with `ui_mode: "embedded"`. |
 | `theme` | `BillKitThemeTokens` | Colour, radius, font and spacing tokens. Forwarded over `postMessage`, never through the URL. |
-| `locale` | `string` | BCP-47, for example `"nl"`. Defaults to the customer's browser. |
+| `locale` | `string` | BCP-47, for example `"nl"`. Defaults to the customer's browser. Sets the element's `<html lang>` and its document title too. |
+| `title` | `string` | Accessible name for the `<iframe>`. Defaults to "BillKit secure checkout" / "BillKit saved payment methods" per element kind. Those defaults are English, and this string lives on **your** page rather than inside the element, so `locale` cannot reach it. Set it when your page is not in English. |
 | `loadTimeoutMs` | `number` | How long to wait for the iframe to boot before firing `onError({ code: "load_timeout" })`. Default `20000`; `0` disables it. |
 | `iframeOrigin` | `string` | Defaults to `https://js.billkit.eu`. The seam for a BillKit-operated vanity domain. |
 | `apiBase` | `string` | API origin the iframe calls. Defaults to `https://api.billkit.eu`. |
@@ -100,6 +118,9 @@ Both elements take the same base options.
 |---|---|---|
 | `payment_declined` | The element, after a confirm that failed with no redirect. | Re-enable your pay button. The element keeps its own retry panel on screen, so the buyer can pick another method without leaving the page. Do **not** navigate away. |
 | `element_crashed` | The element, after an unrecoverable render error. It replaces itself with an error pane. | Nothing was charged. Re-enable your pay button and stop waiting; only a reload recovers the element, so offer the hosted checkout as a fallback. |
+| `no_payment_methods` | The element, when nothing the tenant enabled is payable for the session's currency and the buyer's country. | Nothing was charged and a retry changes nothing: there is no form to fill in. Send the buyer somewhere that can take the payment, and check the price's method allowlist. |
+| `missing_session_id` | The element, when the `client_secret` carried no parseable session id. | An integration fault. Pass the whole `<sessionId>_secret_…` value from `POST /v1/checkout/sessions`, unmodified. |
+| `missing_client_secret` | The element, when the payment-method element was mounted without a secret. | Same class as above: nothing to retry, fix the mount. |
 | `load_timeout` | The loader, when the iframe never booted within `loadTimeoutMs`. | Check CSP `frame-src` and ad blockers; offer the hosted checkout as a fallback. |
 | `unsafe_redirect` | The loader, refusing a redirect target that was not absolute `http(s)`. | Should never happen in production. Treat it as a security event. |
 
@@ -130,6 +151,13 @@ onRedirect: (url) => {
   return false; // you took over; the loader will not navigate
 };
 ```
+
+Returning `false` is not "cancel the payment": it means *you* will navigate.
+The URL is handed to you for exactly that, so the resume is
+`location.assign(url)` after your own work, including in an `await`, since
+the loader has already stepped aside. Return `false` without ever navigating
+and the buyer sits on a form whose payment has already been created at the
+provider.
 
 Terminal state for a redirect flow arrives on your server through the `checkout.session.completed` webhook, not in the browser. Treat the redirect back to `success_url` as a UI hint and the webhook as the source of truth.
 
