@@ -2,7 +2,7 @@
  * `@billkit-eu/js`: the browser SDK for BillKit's embedded checkout.
  *
  * The Stripe-Elements-shaped payment UI for BillKit on Mollie: a
- * `<CheckoutElement/>` that mounts a cross-origin iframe served from
+ * `<CheckoutElement/>` (and a one-off `<OneShotPaymentElement/>`) that mounts a cross-origin iframe served from
  * js.billkit.eu, so card data never touches the tenant's page (PCI SAQ A)
  * while the element still honours the tenant's theme tokens.
  *
@@ -10,6 +10,11 @@
  */
 
 export { mountCheckoutElement, type CheckoutElementOptions } from "./checkout-element";
+export {
+  mountOneShotPaymentElement,
+  type OneShotPaymentElementOptions,
+  type OneShotSuccessEvent,
+} from "./one-shot-element";
 export {
   mountPaymentMethodElement,
   type PaymentMethodElementOptions,

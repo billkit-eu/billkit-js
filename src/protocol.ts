@@ -27,7 +27,18 @@ export const DEFAULT_IFRAME_ORIGIN = "https://js.billkit.eu";
 /** Where the iframe calls the confirm/element API by default. */
 export const DEFAULT_API_BASE = "https://api.billkit.eu";
 
-export type ElementKind = "checkout" | "payment-method";
+/**
+ * Which element the iframe should render.
+ *
+ * `"one-shot"` (added in loader 0.4.0) is the one-off payment form for a
+ * `POST /v1/checkout/one_shot` created with `ui_mode: "embedded"`: no
+ * subscription, no mandate, no coupon. It is its own kind rather than a
+ * `"checkout"` that sniffs the secret's prefix, so the iframe is told what
+ * it is rendering instead of guessing, and an element deployment that
+ * predates it refuses the unknown kind in `parseInboundMessage` rather than
+ * treating a one-shot secret as a checkout session.
+ */
+export type ElementKind = "checkout" | "payment-method" | "one-shot";
 
 /** Delimiter separating the session id from the random tail in a secret. */
 const CHECKOUT_SECRET_DELIM = "_secret_";
@@ -100,6 +111,16 @@ export type HostMessage =
    * carrying no guard of its own.
    */
   | { type: "billkit:redirect"; url: string }
+  /**
+   * The payment completed without leaving the page.
+   *
+   * `sessionId` is the id of the object the element was mounted for: the
+   * checkout session (`cs_…`) for the checkout element, the one-off payment
+   * (`osp_…`) for the one-shot element. The wire name predates the one-shot
+   * element and is kept so a newer element still talks to an older loader;
+   * `mountOneShotPaymentElement` surfaces it to the merchant as
+   * `oneShotPaymentId`.
+   */
   | { type: "billkit:success"; sessionId: string; paymentStatus: string }
   /**
    * Any terminal failure of the current attempt, routed to `onError`.
@@ -141,6 +162,14 @@ export type HostMessage =
  *   `POST /v1/checkout/sessions`, unmodified.
  * - `missing_client_secret`: the payment-method element was initialised
  *   without a secret at all. Same class: nothing to retry, fix the mount.
+ * - `payment_not_open`: the one-shot element was mounted for a one-off
+ *   payment that is no longer payable (it expired unpaid, it failed, or it
+ *   was already paid). Nothing new was charged; create a fresh one-shot to
+ *   take the payment again.
+ *
+ * On the one-shot element `payment_declined` is final: a one-off payment
+ * makes at most one provider payment, so the element shows no retry and
+ * the merchant has to create a new one-shot for the buyer to try again.
  *
  * Not exhaustive at runtime: `code` is passed through verbatim, so branch
  * on the ones you handle and fall back to `message`.
@@ -151,6 +180,7 @@ export const ELEMENT_ERROR_CODES = [
   "no_payment_methods",
   "missing_session_id",
   "missing_client_secret",
+  "payment_not_open",
 ] as const;
 
 const HOST_MESSAGE_TYPES = new Set<HostMessage["type"]>([

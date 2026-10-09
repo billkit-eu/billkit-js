@@ -9,6 +9,21 @@ Versioned independently of the server SDKs. `@billkit-eu/react` tracks this
 package through a peer dependency, so a breaking change here is a breaking
 change there.
 
+## [0.4.0] - 2026-10-09
+
+### Added
+- `mountOneShotPaymentElement(target, options)`, the embedded form for a
+  one-off payment created with `POST /v1/checkout/one_shot` and
+  `ui_mode: "embedded"`. Same iframe, origin lock and `postMessage` model as
+  the checkout element; a new element kind, `"one-shot"`, tells the iframe
+  which form to draw. `onSuccess` receives `{ oneShotPaymentId, paymentStatus }`.
+  **Requires the element deployed at js.billkit.eu to understand the
+  `"one-shot"` kind.** An older element rejects the unknown kind and ignores
+  the `init`, so the form stays on its loading skeleton and no callback fires;
+  the element is deployed before this release for exactly that reason.
+- `payment_not_open` in `ELEMENT_ERROR_CODES`: the one-shot element was
+  mounted for a one-off payment that is no longer payable.
+
 ## [0.3.0]
 
 ### Fixed

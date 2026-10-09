@@ -140,7 +140,12 @@ describe("parseHostMessage", () => {
       "no_payment_methods",
       "missing_session_id",
       "missing_client_secret",
+      "payment_not_open",
     ]);
+  });
+
+  it("parses a one-shot secret's id the same way as a checkout secret's", () => {
+    expect(sessionIdFromClientSecret("osp_AbC-123_secret_r4nd0m")).toBe("osp_AbC-123");
   });
 });
 

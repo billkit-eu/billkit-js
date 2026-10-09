@@ -30,8 +30,11 @@ export interface BillKitElementError {
 /** Options common to every BillKit element. */
 export interface BaseElementOptions {
   /**
-   * Ephemeral checkout `client_secret` (`<sessionId>_secret_...`) from
-   * `POST /v1/checkout/sessions` with `ui_mode: "embedded"`.
+   * Ephemeral `client_secret` (`<id>_secret_...`): from
+   * `POST /v1/checkout/sessions` with `ui_mode: "embedded"` for the
+   * checkout and payment-method elements, or from
+   * `POST /v1/checkout/one_shot` with `ui_mode: "embedded"` for the
+   * one-shot element.
    */
   clientSecret: string;
   /** Theme tokens forwarded to the iframe (colour / radius / font). */
@@ -43,7 +46,7 @@ export interface BaseElementOptions {
    * readers as they move through your page.
    *
    * Defaults to "BillKit secure checkout" / "BillKit saved payment
-   * methods" per element kind. Those defaults are English, and the frame
+   * methods" / "BillKit secure payment" per element kind. Those defaults are English, and the frame
    * title is the one string of ours that lives on YOUR page rather than
    * inside the element, so it is the one `locale` cannot reach. Set it
    * when the rest of your page is not in English.
@@ -125,6 +128,7 @@ export interface BillKitElementHandle {
 const DEFAULT_IFRAME_TITLE: Record<ElementKind, string> = {
   checkout: "BillKit secure checkout",
   "payment-method": "BillKit saved payment methods",
+  "one-shot": "BillKit secure payment",
 };
 
 /**
@@ -271,7 +275,9 @@ export class ElementController implements BillKitElementHandle {
 
   private createIframe(): HTMLIFrameElement {
     const iframe = document.createElement("iframe");
-    const path = this.kind === "checkout" ? "/embed" : "/methods";
+    // The one-shot form is the checkout element's own page, told which
+    // kind it is by `billkit:init`; only the wallet has a page of its own.
+    const path = this.kind === "payment-method" ? "/methods" : "/embed";
     // No secret in the URL. The client_secret is delivered over
     // postMessage after the ready handshake.
     iframe.src = `${this.origin}${path}`;

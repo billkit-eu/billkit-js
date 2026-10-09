@@ -1,6 +1,6 @@
 {
   "name": "@billkit-eu/js",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Browser SDK for BillKit: the embedded checkout element (<CheckoutElement/>) served from js.billkit.eu. The Stripe-Elements-shaped payment UI for BillKit on Mollie.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -63,7 +63,7 @@
     "jsdom": "^25.0.1",
     "tsup": "^8.3.5",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^5.0.1"
   },
   "sideEffects": false
 }

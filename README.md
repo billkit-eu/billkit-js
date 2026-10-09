@@ -88,16 +88,65 @@ const wallet = mountPaymentMethodElement("#methods", {
 });
 ```
 
+## One-off payments
+
+For a single charge with no subscription and no saved mandate (a top-up, a
+setup fee, one order), create the one-shot on your server with
+`ui_mode: "embedded"` and mount the one-shot element with its secret:
+
+```ts
+// server, with your secret key
+const payment = await billkit.oneShotPayments.create({
+  customer_id: customer.id,
+  amount_cents: 2500,
+  currency: "EUR",
+  ui_mode: "embedded",          // no method: the buyer picks it in the element
+  success_url: "https://app.example.com/thanks",
+});
+// hand payment.client_secret to the page
+```
+
+```ts
+import { mountOneShotPaymentElement } from "@billkit-eu/js";
+
+const element = mountOneShotPaymentElement("#pay", {
+  clientSecret,
+  onSuccess: ({ oneShotPaymentId }) => (location.href = `/thanks?p=${oneShotPaymentId}`),
+  onError: ({ code, message }) => showToast(message),
+});
+```
+
+The element shows the amount (with the VAT line the payment was created
+with), lets the buyer pick a method your account has enabled for the currency
+(card through Mollie Components, iDEAL with a bank picker, Bancontact, EPS,
+PayPal, Apple Pay, bank transfer) and confirms it. Card payments that clear
+without a challenge fire `onSuccess`; everything else navigates the top window
+and the buyer comes back to your `success_url`. Either way, the
+`one_shot_payment.succeeded` webhook is the record of the money.
+
+Two differences from the checkout element:
+
+- `onSuccess` receives `{ oneShotPaymentId, paymentStatus }`.
+- A decline is final. A one-off payment makes at most one provider payment, so
+  `onError({ code: "payment_declined" })` shows a panel with no retry. Create a
+  new one-shot and mount a new element to let the buyer try again. Pressing pay
+  twice never charges twice: the server answers every later confirm with the
+  first one's result.
+
+The secret expires (30 minutes by default; `expires_at` on the one-shot says
+when). A one-shot whose secret lapsed unpaid is expired by BillKit and
+announced with `one_shot_payment.failed`.
+
 ## Options
 
-Both elements take the same base options.
+All three elements take the same base options.
 
 | Option | Type | Notes |
 |---|---|---|
-| `clientSecret` | `string` | Required. The `<sessionId>_secret_...` value from `POST /v1/checkout/sessions` with `ui_mode: "embedded"`. |
+| `clientSecret` | `string` | Required. The `<id>_secret_...` value from `POST /v1/checkout/sessions` (checkout and payment-method elements) or `POST /v1/checkout/one_shot` (one-shot element), each with `ui_mode: "embedded"`. |
 | `theme` | `BillKitThemeTokens` | Colour, radius, font and spacing tokens. Forwarded over `postMessage`, never through the URL. |
 | `locale` | `string` | BCP-47, for example `"nl"`. Defaults to the customer's browser. Sets the element's `<html lang>` and its document title too. |
-| `title` | `string` | Accessible name for the `<iframe>`. Defaults to "BillKit secure checkout" / "BillKit saved payment methods" per element kind. Those defaults are English, and this string lives on **your** page rather than inside the element, so `locale` cannot reach it. Set it when your page is not in English. |
+| `title` | `string` | Accessible name for the `<iframe>`. Defaults to "BillKit secure checkout" / "BillKit saved payment methods" / "BillKit secure payment" per element kind. Those defaults are English, and this string lives on **your** page rather than inside the element, so `locale` cannot reach it. Set it when your page is not in English. |
 | `loadTimeoutMs` | `number` | How long to wait for the iframe to boot before firing `onError({ code: "load_timeout" })`. Default `20000`; `0` disables it. |
 | `iframeOrigin` | `string` | Defaults to `https://js.billkit.eu`. The seam for a BillKit-operated vanity domain. |
 | `apiBase` | `string` | API origin the iframe calls. Defaults to `https://api.billkit.eu`. |
@@ -116,11 +165,12 @@ Both elements take the same base options.
 
 | `code` | Raised by | What to do |
 |---|---|---|
-| `payment_declined` | The element, after a confirm that failed with no redirect. | Re-enable your pay button. The element keeps its own retry panel on screen, so the buyer can pick another method without leaving the page. Do **not** navigate away. |
+| `payment_declined` | The element, after a confirm that failed with no redirect. | Re-enable your pay button. The checkout element keeps its own retry panel on screen, so the buyer can pick another method without leaving the page. Do **not** navigate away. On the one-shot element the decline is final: create a new one-shot to retry. |
 | `element_crashed` | The element, after an unrecoverable render error. It replaces itself with an error pane. | Nothing was charged. Re-enable your pay button and stop waiting; only a reload recovers the element, so offer the hosted checkout as a fallback. |
 | `no_payment_methods` | The element, when nothing the tenant enabled is payable for the session's currency and the buyer's country. | Nothing was charged and a retry changes nothing: there is no form to fill in. Send the buyer somewhere that can take the payment, and check the price's method allowlist. |
 | `missing_session_id` | The element, when the `client_secret` carried no parseable session id. | An integration fault. Pass the whole `<sessionId>_secret_…` value from `POST /v1/checkout/sessions`, unmodified. |
 | `missing_client_secret` | The element, when the payment-method element was mounted without a secret. | Same class as above: nothing to retry, fix the mount. |
+| `payment_not_open` | The one-shot element, mounted for a one-off payment that is no longer payable (expired, failed or already paid). | Nothing new was charged. Create a fresh one-shot if the buyer still needs to pay. |
 | `load_timeout` | The loader, when the iframe never booted within `loadTimeoutMs`. | Check CSP `frame-src` and ad blockers; offer the hosted checkout as a fallback. |
 | `unsafe_redirect` | The loader, refusing a redirect target that was not absolute `http(s)`. | Should never happen in production. Treat it as a security event. |
 
