@@ -2,8 +2,10 @@ import {
   type ClientMessage,
   DEFAULT_API_BASE,
   DEFAULT_IFRAME_ORIGIN,
+  type ElementErrorCode,
   type ElementKind,
   type HostMessage,
+  PROTOCOL_VERSION,
   isSafeRedirectUrl,
   parseHostMessage,
   sessionIdFromClientSecret,
@@ -19,12 +21,23 @@ export interface SuccessEvent {
 
 export interface ChangeEvent {
   complete: boolean;
-  method?: string;
+  /**
+   * The method the buyer has picked, in the API's vocabulary
+   * (`creditcard`, `ideal`, ...). Named as the API names it everywhere
+   * else; it was `method` before 1.0.
+   */
+  payment_method?: string;
 }
 
 export interface BillKitElementError {
+  /** Human-readable, already localised by the element. */
   message: string;
-  code?: string;
+  /**
+   * Machine-readable. Open: a newer element can send a code this SDK does
+   * not list in `ELEMENT_ERROR_CODES`, so branch on the ones you handle and
+   * fall back to `message`.
+   */
+  code?: ElementErrorCode | (string & {});
 }
 
 /** Options common to every BillKit element. */
@@ -56,7 +69,12 @@ export interface BaseElementOptions {
    * Origin the element iframe is served from. Defaults to the BillKit-
    * hosted `https://js.billkit.eu`. Overriding it is the seam for a
    * future tenant custom-domain (CNAME) that BillKit still operates:
-   * point it at your vanity host once that's provisioned.
+   * point it at your vanity host once that's provisioned. Reduced to its
+   * origin (`new URL(x).origin`); a value that is not an absolute https
+   * URL throws at mount. Plain `http` is accepted only for a loopback host
+   * (`localhost`, `*.localhost`, `127.0.0.1`, `[::1]`), for local
+   * development: the frame receives the `client_secret`, which must not
+   * cross the network in clear text.
    */
   iframeOrigin?: string;
   /** API origin the iframe calls for `/element` + `/confirm`. */
@@ -65,7 +83,9 @@ export interface BaseElementOptions {
    * Milliseconds to wait for the element to finish loading before firing
    * `onError({ code: "load_timeout" })`. Guards against a silent hang when
    * the iframe origin is blocked (missing CSP `frame-src`, network/ad
-   * blocker) and never boots. Default 20000; pass `0` to disable.
+   * blocker) and never boots. Default 20000; pass `0` (or `Infinity`) to
+   * disable. A value that is not a number, or is `NaN`, falls back to the
+   * default rather than firing at once.
    */
   loadTimeoutMs?: number;
   /** Fired once the iframe has booted and loaded the session. */
@@ -180,6 +200,49 @@ function resolveTarget(target: HTMLElement | string): HTMLElement {
  * `<CheckoutElement/>` and `<PaymentMethodElement/>` are thin wrappers
  * over this.
  */
+
+/**
+ * Reduce `iframeOrigin` to the exact string a browser puts in
+ * `MessageEvent.origin`: scheme, lowercased host and a non-default port, with
+ * no path and no trailing slash. Every message from the element is matched
+ * against it with `===`, so `https://Pay.Acme.com:443/` written by hand used to
+ * mount fine and then drop every message the frame sent. Anything without an
+ * https origin is refused at mount rather than producing an element that
+ * can never finish loading, and so is `http` anywhere but a loopback host:
+ * the `client_secret` is posted into this frame, and an `http` element on a
+ * real network hands it to anyone on the path.
+ */
+function normaliseIframeOrigin(value: string): string {
+  const refuse = (): never => {
+    throw new Error(
+      `BillKit: \`iframeOrigin\` must be an absolute https:// origin (http only for localhost), got ${JSON.stringify(value)}.`,
+    );
+  };
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return refuse();
+  }
+  if (url.protocol === "https:") return url.origin;
+  if (url.protocol === "http:" && isLoopbackHost(url.hostname)) return url.origin;
+  return refuse();
+}
+
+/** `localhost`, a `*.localhost` name, `127.0.0.0/8` or `[::1]`. */
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "[::1]" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+  );
+}
+
+/** Longest delay `setTimeout` honours; anything above it fires at once. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+const DEFAULT_LOAD_TIMEOUT_MS = 20_000;
 export class ElementController implements BillKitElementHandle {
   private readonly origin: string;
   private readonly apiBase: string;
@@ -191,6 +254,12 @@ export class ElementController implements BillKitElementHandle {
   private readonly logger: BillKitElementLogger;
   private destroyed = false;
   private ready = false;
+  /**
+   * The protocol the iframe announced in `billkit:ready` (0 before it
+   * announced one). Kept so a later loader can gate a newer message on what
+   * the element in front of it understands.
+   */
+  private iframeProtocol = 0;
   private loadTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * A `submit()` that arrived before the iframe could hear it.
@@ -236,7 +305,7 @@ export class ElementController implements BillKitElementHandle {
     this.theme = options.theme;
     this.logger = options.logger ?? NOOP_ELEMENT_LOGGER;
     this.customerId = extra.customerId;
-    this.origin = (options.iframeOrigin ?? DEFAULT_IFRAME_ORIGIN).replace(/\/$/, "");
+    this.origin = normaliseIframeOrigin(options.iframeOrigin ?? DEFAULT_IFRAME_ORIGIN);
     this.apiBase = (options.apiBase ?? DEFAULT_API_BASE).replace(/\/$/, "");
 
     const mountPoint = resolveTarget(target);
@@ -308,10 +377,12 @@ export class ElementController implements BillKitElementHandle {
     //                         sandbox or the bank's own page breaks.
     //
     // Deliberately absent: `allow-top-navigation`. Redirects travel up as
-    // a `billkit:redirect` message and the loader performs them after
-    // `isSafeRedirectUrl`, so the frame never needs to steer the top
-    // window itself, and withholding it is what stops a compromised
-    // element from navigating the merchant's page to a phishing clone.
+    // a `billkit:redirect` message and the loader performs them only after
+    // `isSafeRedirectUrl` accepts the target, which admits nothing but an
+    // https URL on Mollie's own hosts (`mollie.com` and its subdomains).
+    // So the frame never steers the top window itself, and a compromised
+    // element can send the merchant's page to Mollie's checkout and
+    // nowhere else: not to a phishing clone of the merchant.
     iframe.setAttribute(
       "sandbox",
       "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox",
@@ -375,9 +446,20 @@ export class ElementController implements BillKitElementHandle {
   private route(message: HostMessage): void {
     switch (message.type) {
       case "billkit:ready":
+        this.iframeProtocol = message.protocol;
+        if (message.protocol > PROTOCOL_VERSION) {
+          // A newer element in front of an older loader is the normal state
+          // of a merchant who has not upgraded. It still honours this
+          // loader's protocol, so this is information, not a problem.
+          this.logger.debug("BillKit element speaks a newer protocol; using this loader's", {
+            element: this.kind,
+            elementProtocol: message.protocol,
+            loaderProtocol: PROTOCOL_VERSION,
+          });
+        }
         // `ready` is proof the iframe booted, which is the only thing the
-        // watchdog was ever guarding against. What follows — fetching the
-        // element bundle's session view over the network — can legitimately
+        // watchdog was ever guarding against. What follows (fetching the
+        // element bundle's session view over the network) can legitimately
         // outlast `loadTimeoutMs` on a slow connection, and firing
         // `load_timeout` then told the merchant the element had failed
         // while a perfectly working form finished rendering underneath the
@@ -385,7 +467,10 @@ export class ElementController implements BillKitElementHandle {
         // because it never gets here.
         this.clearLoadTimer();
         this.ready = true;
-        this.logger.debug("BillKit element ready; sending init", { element: this.kind });
+        this.logger.debug("BillKit element ready; sending init", {
+          element: this.kind,
+          elementProtocol: this.iframeProtocol,
+        });
         this.sendInit();
         break;
       case "billkit:loaded":
@@ -397,7 +482,12 @@ export class ElementController implements BillKitElementHandle {
         this.iframe.style.height = `${message.height}px`;
         break;
       case "billkit:change":
-        this.options.onChange?.({ complete: message.complete, method: message.method });
+        this.options.onChange?.({
+          complete: message.complete,
+          ...(message.payment_method !== undefined
+            ? { payment_method: message.payment_method }
+            : {}),
+        });
         break;
       case "billkit:redirect":
         this.handleRedirect(message.url);
@@ -418,8 +508,14 @@ export class ElementController implements BillKitElementHandle {
   }
 
   private startLoadTimer(): void {
-    const ms = this.options.loadTimeoutMs ?? 20_000;
-    if (ms <= 0) return;
+    const raw = this.options.loadTimeoutMs;
+    // `NaN <= 0` is false and `setTimeout(fn, NaN)` fires at once, so a
+    // NaN (an unparsed env var, typically) used to report `load_timeout`
+    // on every mount. It means "not configured", so it gets the default.
+    const ms = typeof raw === "number" && !Number.isNaN(raw) ? raw : DEFAULT_LOAD_TIMEOUT_MS;
+    // `Infinity`, or any delay past what `setTimeout` can hold, would also
+    // fire at once; both can only mean "never".
+    if (ms <= 0 || ms > MAX_TIMEOUT_MS) return;
     this.loadTimer = setTimeout(() => {
       this.loadTimer = null;
       if (this.destroyed) return;
@@ -453,6 +549,7 @@ export class ElementController implements BillKitElementHandle {
       sessionId: sessionIdFromClientSecret(this.options.clientSecret),
       apiBase: this.apiBase,
       loaderVersion: VERSION,
+      protocol: PROTOCOL_VERSION,
       ...(this.theme ? { theme: this.theme } : {}),
       ...(this.options.locale ? { locale: this.options.locale } : {}),
       ...(this.customerId ? { customerId: this.customerId } : {}),
@@ -467,12 +564,12 @@ export class ElementController implements BillKitElementHandle {
   }
 
   private handleRedirect(url: string): void {
-    // Defence in depth: `parseHostMessage` already drops any redirect whose
-    // URL is not absolute http(s), so a `javascript:` URL can never reach
-    // here. Re-checking at the navigation site keeps the guarantee local to
-    // the dangerous call. This is the line that would turn an
-    // element-scoped XSS into a same-origin-policy escape onto the
-    // merchant's page.
+    // The one guard on this navigation: `parseHostMessage` checks the
+    // message's shape only, so a `javascript:` URL, or an https URL on a
+    // host that is not Mollie's, arrives here and is refused here. This is
+    // the line that would otherwise turn an element-scoped XSS into a
+    // same-origin-policy escape onto the merchant's page, or a redirect of
+    // the merchant's buyers to a page of the attacker's choosing.
     if (!isSafeRedirectUrl(url)) {
       // A security refusal, not a payment failure. Worth a warning even
       // though `onError` also fires, since the merchant's error handler
@@ -498,10 +595,17 @@ export class ElementController implements BillKitElementHandle {
       element: this.kind,
       target: safeOriginOf(url),
     });
+    // The `href` setter, not `assign()`. When the merchant's page is itself
+    // framed by another origin, `window.top` is a cross-origin window, and
+    // of its `Location` only the `href` setter and `replace()` may be
+    // touched; `assign()` throws a SecurityError. `replace()` would also
+    // drop the merchant's page from the buyer's history, so the back button
+    // from the bank would skip it.
     try {
-      (window.top ?? window).location.assign(url);
+      (window.top ?? window).location.href = url;
     } catch {
-      // Cross-origin top access blocked, so fall back to this window.
+      // Top navigation itself refused (a sandboxed frame without
+      // `allow-top-navigation`), so navigate the frame we are in instead.
       window.location.assign(url);
     }
   }
@@ -550,7 +654,7 @@ export class ElementController implements BillKitElementHandle {
    * Safe to call at any point in the lifecycle, including before the
    * iframe has booted. A pre-`ready` call used to be posted into a frame
    * with no listener yet and silently dropped, and then `init` replayed
-   * the *constructor's* theme over the top — so mounting in light mode
+   * the *constructor's* theme over the top, so mounting in light mode
    * and immediately switching to dark left a light element. Storing the
    * tokens is what makes the call stick; the post is the fast path for
    * an element already on screen.

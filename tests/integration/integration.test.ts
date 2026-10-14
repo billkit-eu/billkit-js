@@ -122,7 +122,7 @@ d("@billkit-eu/js against a live API", () => {
       // is listening.
       expect(post).not.toHaveBeenCalled();
 
-      fromIframe(iframe, { type: "billkit:ready" });
+      fromIframe(iframe, { type: "billkit:ready", protocol: 1 });
 
       expect(post).toHaveBeenCalledTimes(1);
       const [message, targetOrigin] = post.mock.calls[0]!;
@@ -130,6 +130,7 @@ d("@billkit-eu/js against a live API", () => {
       expect(message).toMatchObject({
         type: "billkit:init",
         element: "checkout",
+        protocol: 1,
         clientSecret: session.clientSecret,
         // The crux: the id the loader parsed must be the id the API minted.
         sessionId: session.sessionId,

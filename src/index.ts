@@ -32,14 +32,12 @@ export {
   type ElementLogContext,
 } from "./logging";
 export type { BillKitThemeTokens } from "./theme";
+// The postMessage wire types (`ClientMessage`, `HostMessage`), the secret
+// parser and the redirect guard are internal: the protocol is versioned
+// between this loader and the iframe, and is not a merchant-facing API.
 export {
-  DEFAULT_API_BASE,
   DEFAULT_IFRAME_ORIGIN,
   ELEMENT_ERROR_CODES,
-  isSafeRedirectUrl,
-  sessionIdFromClientSecret,
-  type ClientMessage,
-  type ElementKind,
-  type HostMessage,
+  type ElementErrorCode,
 } from "./protocol";
 export { VERSION } from "./version";

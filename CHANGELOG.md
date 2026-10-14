@@ -9,6 +9,156 @@ Versioned independently of the server SDKs. `@billkit-eu/react` tracks this
 package through a peer dependency, so a breaking change here is a breaking
 change there.
 
+## [1.0.0] - 2026-10-14
+
+The first stable release. From here on the package follows semantic
+versioning, and the loader-to-element protocol is versioned separately so it
+can evolve without breaking a loader already in a merchant's bundle. Getting
+there took a deliberate break from 0.x, listed under **Upgrading from 0.x**.
+
+### Added
+- **A versioned loader-to-element protocol.** `billkit:init` carries
+  `protocol: 1`, and the element announces its own protocol in
+  `billkit:ready`. The element keeps serving every protocol a released loader
+  sends; a loader in front of a newer element keeps speaking its own and logs
+  the difference at `debug`. Requires an element at js.billkit.eu that
+  announces a protocol, which ships first; in front of an older element the
+  handshake completes exactly as before.
+- `ElementErrorCode`, the union of `ELEMENT_ERROR_CODES`.
+- A declared browser support matrix: the last two versions of Chrome, Edge
+  and Firefox, Firefox ESR, and Safari 16.4+ (macOS and iOS), in
+  `browserslist` and the README.
+- `SECURITY.md` ships in the package, beside the README and licence.
+- Three one-shot `ELEMENT_ERROR_CODES`. `client_secret_expired`: the
+  one-shot's `client_secret` lapsed, so the element can no longer show the
+  payment; its status is unknown there (it may be paid), so look it up with
+  `GET /v1/checkout/one_shot/{id}` or wait for its webhook before creating
+  another. `client_secret_invalid`: any other refusal of the secret, an
+  integration fault. `payment_refunded`: the one-shot was paid and then
+  refunded.
+- Four checkout-element `ELEMENT_ERROR_CODES`. `session_expired` and
+  `session_closed`: the checkout session is over (it expired, or was
+  completed or overtaken elsewhere), where an element before this release
+  sent only a localised message. `payment_in_progress`: the buyer came back
+  to a checkout whose payment is still open at the provider; the element
+  offers the way back to it, and a submit continues there (or, with no page
+  to go back to, looks again and sends `payment_in_progress` again while the
+  payment is still in flight). `request_timeout`: an API request got no
+  answer in time; the element keeps its retry on offer.
+
+### Changed
+- **`billkit:redirect` is followed only to Mollie.** The loader navigates the
+  top window only to an absolute `https` URL on `mollie.com` or a subdomain,
+  the only place the element sends a buyer (3-D Secure, iDEAL, PayPal, bank
+  transfer details); anything else is `onError({ code: "unsafe_redirect" })`
+  before `onRedirect` is called. It accepted any `http(s)` URL, so the
+  documented promise that a compromised element could not send the merchant's
+  page to a phishing clone was not kept. `isSafeRedirectUrl` applies the same
+  rule.
+- `loadTimeoutMs: NaN` (or a non-number) counts as unset and gets the
+  20 second default; it fired `load_timeout` at once. `Infinity`, or a delay
+  past what `setTimeout` can hold, disables the watchdog instead of firing
+  immediately.
+- `ELEMENT_ERROR_CODES` includes the loader's own `load_timeout` and
+  `unsafe_redirect`, which reached `onError` in 0.x without being listed.
+- **`ChangeEvent.method` is `ChangeEvent.payment_method`**, the name the API
+  uses for the same thing everywhere else. The loader also reads the old
+  `method` from an element that predates the rename, so `onChange` carries
+  `payment_method` whichever element answers.
+- `BillKitElementError.code` is typed `ElementErrorCode | (string & {})`:
+  the known codes autocomplete, and a newer one is still a string.
+- `PaymentMethodElementOptions.customerId` is optional. The `client_secret`
+  names the customer; the element never authorised on `customerId`.
+- `engines.node` is `>=22`, for tooling only; nothing in the package runs
+  on Node.
+- `iframeOrigin` is reduced to `new URL(value).origin`, the exact string a
+  browser reports as a message's origin. `https://Pay.Acme.com:443/` used to
+  mount and then drop every message from the frame, because the comparison is
+  exact. A value that is not an absolute https URL throws at mount; plain
+  `http` is accepted only for a loopback host (`localhost`, `*.localhost`,
+  `127.0.0.1`, `[::1]`), because the frame receives the `client_secret`.
+- `payment_not_open` now means only "expired unpaid or failed, nothing was
+  charged". An element at js.billkit.eu that predates this release reported
+  an expired secret and a refunded one-shot as `payment_not_open` too, which
+  told the merchant to charge again for a payment that may have gone through.
+
+### Removed
+- The `postMessage` internals from the package's exports: `ClientMessage`,
+  `HostMessage`, `ElementKind`, `sessionIdFromClientSecret`,
+  `isSafeRedirectUrl` and `DEFAULT_API_BASE`. The README used to advertise
+  the first two helpers as building blocks; they are a protocol between the
+  loader and the element, and exporting them made every protocol change a
+  breaking release of this package.
+
+### Fixed
+- **CommonJS consumers get CommonJS types.** `exports` pointed every consumer
+  at `dist/index.d.ts`, which TypeScript reads as ESM because the package is
+  `"type": "module"`, so a CJS project on `module: node16` failed with TS1479
+  on a plain import even though the runtime `require` worked. Each condition
+  now names its own types: `import` gets `index.d.ts`, `require` gets
+  `index.d.cts`. No runtime change.
+- **The redirect to the bank works when your page is itself framed.** The
+  loader navigated the top window with `location.assign()`, which a
+  cross-origin `Location` refuses with a SecurityError, so a checkout page
+  embedded by another origin fell back to navigating its own frame, where 3DS
+  and iDEAL pages refuse to render. It now sets `location.href`, which a
+  cross-origin top window allows. The https-on-Mollie guard is unchanged and
+  still runs first.
+- `package.json` is in the `exports` map, so tooling that reads
+  `@billkit-eu/js/package.json` resolves it.
+
+### Upgrading from 0.x
+
+**Removed exports.** If you parsed a session id out of a `client_secret`,
+read it from the server response instead, which carries it as `id`; the
+secret's format is not a contract.
+
+```ts
+// 0.x
+import { sessionIdFromClientSecret } from "@billkit-eu/js";
+const sessionId = sessionIdFromClientSecret(clientSecret);
+// 1.0: from your server, alongside the secret
+const { id: sessionId, client_secret } = await client.checkoutSessions.create({ /* ... */ });
+```
+
+The wire types (`ClientMessage`, `HostMessage`, `ElementKind`) have no
+replacement: post nothing to the element yourself. `isSafeRedirectUrl` was a
+guard the loader already applies before every navigation.
+`DEFAULT_API_BASE` was the default of the `apiBase` option, which still
+exists.
+
+**`onChange` names the method `payment_method`.**
+
+```ts
+// 0.x
+onChange: ({ complete, method }) => track(method),
+// 1.0
+onChange: ({ complete, payment_method }) => track(payment_method),
+```
+
+**`customerId` is optional** on `mountPaymentMethodElement`; drop it.
+
+```ts
+// 0.x
+mountPaymentMethodElement("#methods", { clientSecret, customerId: "cus_123" });
+// 1.0
+mountPaymentMethodElement("#methods", { clientSecret });
+```
+
+**Error codes.** Code that compared `ELEMENT_ERROR_CODES` against the codes
+the element emits now finds the loader's two in the list as well. `code` is
+typed as the union widened with `string`, so an exhaustive `switch` over it
+needs a `default`, which it should always have had.
+
+```ts
+// 0.x: code was `string | undefined`
+onError: ({ code }) => { if (code === "load_timeout") showFallback(); }
+// 1.0: unchanged at runtime, and "load_timeout" now autocompletes
+onError: ({ code }) => { if (code === "load_timeout") showFallback(); }
+```
+
+**Node 22+** for builds and tests.
+
 ## [0.4.0] - 2026-10-09
 
 ### Added
@@ -82,7 +232,7 @@ new value in an existing union.
   unrecoverable render error to the host instead of failing silently: it
   replaces itself with an error pane and posts
   `onError({ code: "element_crashed" })`. Nothing was charged, and a reload is
-  the only recovery, so **re-enable your pay button and stop waiting** — the
+  the only recovery, so **re-enable your pay button and stop waiting**: the
   same handling `payment_declined` already needs.
 
   Previously a crashed element was a blank iframe and `onError` never fired,
@@ -142,7 +292,9 @@ First public release.
   directions, and messages that fail the check are dropped rather than
   best-effort parsed.
 
-[Unreleased]: https://github.com/billkit-eu/billkit-js/compare/v0.2.2...HEAD
+[1.0.0]: https://github.com/billkit-eu/billkit-js/compare/v0.4.0...v1.0.0
+[0.4.0]: https://github.com/billkit-eu/billkit-js/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/billkit-eu/billkit-js/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/billkit-eu/billkit-js/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/billkit-eu/billkit-js/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/billkit-eu/billkit-js/compare/v0.1.0...v0.2.0

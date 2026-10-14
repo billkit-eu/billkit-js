@@ -17,13 +17,17 @@ npm install @billkit-eu/js
 
 Ships ESM and CJS builds with bundled type declarations. No runtime dependencies.
 
+**Browser support:** the last two versions of Chrome, Edge and Firefox, Firefox ESR, and Safari 16.4+ on macOS and iOS. The build targets ES2020; the same list is the package's `browserslist`.
+
+Follows semantic versioning from 1.0.0. Coming from 0.x, see [Upgrading from 0.x](#upgrading-from-0x).
+
 ## How it fits together
 
 The element authenticates with an ephemeral `client_secret`, not an API key. Mint one on your server:
 
 ```ts
 // Your server, using @billkit-eu/sdk
-const session = await client.checkoutSessions.create<{ client_secret: string }>({
+const session = await client.checkoutSessions.create({
   price_id: "price_123",
   ui_mode: "embedded",
   success_url: "https://example.com/thanks",
@@ -76,14 +80,13 @@ Always call `destroy()` when you tear down the surrounding view. A live element 
 
 ## Saved payment methods
 
-The same iframe renders a customer's stored methods, with update and remove built in:
+The same iframe renders a customer's stored methods, with update and remove built in. The `client_secret` names the customer, so nothing else identifies them:
 
 ```ts
 import { mountPaymentMethodElement } from "@billkit-eu/js";
 
 const wallet = mountPaymentMethodElement("#methods", {
   clientSecret,
-  customerId: "cus_123",
   theme: { colorPrimary: "#6d28d9" },
 });
 ```
@@ -100,7 +103,7 @@ const payment = await billkit.oneShotPayments.create({
   customer_id: customer.id,
   amount_cents: 2500,
   currency: "EUR",
-  ui_mode: "embedded",          // no method: the buyer picks it in the element
+  ui_mode: "embedded",          // no payment_method: the buyer picks it in the element
   success_url: "https://app.example.com/thanks",
 });
 // hand payment.client_secret to the page
@@ -147,8 +150,8 @@ All three elements take the same base options.
 | `theme` | `BillKitThemeTokens` | Colour, radius, font and spacing tokens. Forwarded over `postMessage`, never through the URL. |
 | `locale` | `string` | BCP-47, for example `"nl"`. Defaults to the customer's browser. Sets the element's `<html lang>` and its document title too. |
 | `title` | `string` | Accessible name for the `<iframe>`. Defaults to "BillKit secure checkout" / "BillKit saved payment methods" / "BillKit secure payment" per element kind. Those defaults are English, and this string lives on **your** page rather than inside the element, so `locale` cannot reach it. Set it when your page is not in English. |
-| `loadTimeoutMs` | `number` | How long to wait for the iframe to boot before firing `onError({ code: "load_timeout" })`. Default `20000`; `0` disables it. |
-| `iframeOrigin` | `string` | Defaults to `https://js.billkit.eu`. The seam for a BillKit-operated vanity domain. |
+| `loadTimeoutMs` | `number` | How long to wait for the iframe to boot before firing `onError({ code: "load_timeout" })`. Default `20000`; `0` or `Infinity` disables it. `NaN` or a non-number counts as unset and gets the default. |
+| `iframeOrigin` | `string` | Defaults to `https://js.billkit.eu`. The seam for a BillKit-operated vanity domain. Reduced to its origin (a path or trailing slash is dropped, the host lowercased); a value that is not an absolute https URL throws at mount (plain `http` only for `localhost`, `*.localhost`, `127.0.0.1` or `[::1]`, for local development). |
 | `apiBase` | `string` | API origin the iframe calls. Defaults to `https://api.billkit.eu`. |
 | `logger` | `BillKitElementLogger` | Opt-in diagnostics. Off by default. |
 | `onReady` | `() => void` | The iframe booted and loaded the session. |
@@ -157,11 +160,11 @@ All three elements take the same base options.
 | `onError` | `(e: BillKitElementError) => void` | Any element or payment error. See [Error codes](#error-codes). |
 | `onRedirect` | `(url: string) => boolean \| void` | Called before the top window navigates for 3DS or iDEAL. Return `false` to navigate yourself. |
 
-`mountPaymentMethodElement` additionally requires `customerId`.
+`mountPaymentMethodElement` also accepts `customerId`, which is optional and ignored for authorisation: the secret already names the customer.
 
 ### Error codes
 
-`onError` receives `{ message, code? }`. `message` is human-readable and already localised; `code` is the stable tag to branch on.
+`onError` receives `{ message, code? }`. `message` is human-readable and already localised; `code` is the stable tag to branch on. `ELEMENT_ERROR_CODES` lists all fifteen below, and `code` is typed `ElementErrorCode | (string & {})`.
 
 | `code` | Raised by | What to do |
 |---|---|---|
@@ -170,11 +173,18 @@ All three elements take the same base options.
 | `no_payment_methods` | The element, when nothing the tenant enabled is payable for the session's currency and the buyer's country. | Nothing was charged and a retry changes nothing: there is no form to fill in. Send the buyer somewhere that can take the payment, and check the price's method allowlist. |
 | `missing_session_id` | The element, when the `client_secret` carried no parseable session id. | An integration fault. Pass the whole `<sessionId>_secret_…` value from `POST /v1/checkout/sessions`, unmodified. |
 | `missing_client_secret` | The element, when the payment-method element was mounted without a secret. | Same class as above: nothing to retry, fix the mount. |
-| `payment_not_open` | The one-shot element, mounted for a one-off payment that is no longer payable (expired, failed or already paid). | Nothing new was charged. Create a fresh one-shot if the buyer still needs to pay. |
+| `payment_not_open` | The one-shot element, mounted for a one-off payment that is no longer payable (expired unpaid, or failed). | Nothing was charged. Create a fresh one-shot if the buyer still needs to pay. |
+| `payment_refunded` | The one-shot element, mounted for a one-off payment that was paid and then refunded. | Not a success, and not "nothing was charged": the money went out and came back. Do not create another one-shot on this signal alone. |
+| `client_secret_expired` | The one-shot element, when the `client_secret` stopped working (30 minutes after the create; a confirm does not extend it). | The payment's status is **unknown** here: it may be paid, or a bank transfer still in flight. Retrieve the one-shot with `GET /v1/checkout/one_shot/{id}` or wait for its webhook before creating another, or you risk charging the buyer twice. |
+| `client_secret_invalid` | The one-shot element, when the API refused the `client_secret` for any other reason (not a one-shot secret, or one it does not know). | An integration fault. Pass the whole value from the create response, unmodified. |
+| `session_expired` | The checkout element, when the checkout session expired or its `client_secret` window closed. | Final. Create a new checkout session. |
+| `session_closed` | The checkout element, when the session is no longer open for another reason (completed elsewhere, or overtaken by a session that bought the same thing). | Final, and it may have been paid: look the session up server-side before creating another. |
+| `payment_in_progress` | The checkout element, when a payment for this checkout is already in flight (the buyer came back from 3-D Secure or their bank without finishing, or an earlier answer was lost). | Nothing new was charged. Re-enable your pay button: the element shows the way back to that payment, and a submit continues to it. Where there is no page to go back to, a submit looks again, and `payment_in_progress` arrives again while the payment is still in flight. |
+| `request_timeout` | The element, when a request to the API got no answer in time. | Re-enable your pay button. The element keeps its retry on offer, after re-reading the session when a confirm's outcome is unknown. |
 | `load_timeout` | The loader, when the iframe never booted within `loadTimeoutMs`. | Check CSP `frame-src` and ad blockers; offer the hosted checkout as a fallback. |
-| `unsafe_redirect` | The loader, refusing a redirect target that was not absolute `http(s)`. | Should never happen in production. Treat it as a security event. |
+| `unsafe_redirect` | The loader, refusing a redirect target that was not an absolute `https` URL on `mollie.com` or a subdomain of it. | Should never happen in production. Treat it as a security event. |
 
-Unknown codes are always possible — a newer element can mint one — so branch on what you handle and fall through to `message` for the rest.
+Unknown codes are always possible, because a newer element can mint one, so branch on what you handle and fall through to `message` for the rest.
 
 If you drive an external pay button, `payment_declined` is what re-enables it. Without handling it the button stays in its submitting state forever, because a decline fires neither `onSuccess` nor a redirect:
 
@@ -241,21 +251,22 @@ The fixed iframe origin is the whole design:
 - **The `client_secret` is never in the iframe URL**, in either the query or the fragment. It is delivered over a targeted `postMessage` only after the iframe announces `ready`, which keeps it out of `Referer` headers, browser history and server logs.
 - **Every inbound message is checked** against the exact iframe origin *and* the specific frame that sent it, before the payload is parsed. Messages from another origin, or from a sibling element, are dropped.
 - **Outbound messages always name a target origin.** Never `"*"`.
-- **The iframe is sandboxed** and is not granted `allow-top-navigation`. Redirects are requested by message and performed by the loader only after the URL is validated as absolute `http(s)`, so a compromised element cannot navigate your page to a phishing clone.
+- **The iframe is sandboxed** and is not granted `allow-top-navigation`. Redirects are requested by message and performed by the loader only after the URL is validated as an absolute `https` URL on Mollie's own hosts (`mollie.com` and its subdomains), the only place the element sends a buyer (3-D Secure, iDEAL, PayPal). So a compromised element cannot navigate your page to a phishing clone; your own success and cancel pages are reached by Mollie redirecting back, not by the element.
 
 ## TypeScript
 
-Types ship with the package. The exported helpers are useful if you are building your own integration on top:
+Types ship with the package: the option and event types (`CheckoutElementOptions`, `SuccessEvent`, `ChangeEvent`, `BillKitElementError`, `BillKitElementHandle`, `BillKitThemeTokens`, ...) and two constants, `DEFAULT_IFRAME_ORIGIN` and `ELEMENT_ERROR_CODES`.
 
-```ts
-import {
-  sessionIdFromClientSecret,
-  isSafeRedirectUrl,
-  DEFAULT_IFRAME_ORIGIN,
-  type BillKitThemeTokens,
-  type SuccessEvent,
-} from "@billkit-eu/js";
-```
+The `postMessage` protocol between this loader and the element is not part of the API. It is versioned between the two, and the hosted element keeps serving every protocol a released loader speaks, so a loader in your bundle keeps working as the element moves on.
+
+## Upgrading from 0.x
+
+1.0 is a deliberate break; [`CHANGELOG.md`](./CHANGELOG.md) has every change with before and after code. In short:
+
+- No longer exported: `ClientMessage`, `HostMessage`, `ElementKind`, `sessionIdFromClientSecret`, `isSafeRedirectUrl`, `DEFAULT_API_BASE`.
+- `customerId` on `mountPaymentMethodElement` is optional.
+- `ELEMENT_ERROR_CODES` includes `load_timeout` and `unsafe_redirect`; `BillKitElementError.code` is `ElementErrorCode | (string & {})`.
+- Node 22+ for tooling; the browser list is above.
 
 ## Links
 

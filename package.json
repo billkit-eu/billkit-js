@@ -1,6 +1,6 @@
 {
   "name": "@billkit-eu/js",
-  "version": "0.4.0",
+  "version": "1.0.0",
   "description": "Browser SDK for BillKit: the embedded checkout element (<CheckoutElement/>) served from js.billkit.eu. The Stripe-Elements-shaped payment UI for BillKit on Mollie.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -8,16 +8,23 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
-    }
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
     "src",
     "README.md",
     "CHANGELOG.md",
+    "SECURITY.md",
     "LICENSE"
   ],
   "scripts": {
@@ -27,11 +34,20 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src tests",
     "size": "npm run build && gzip -c dist/index.js | wc -c",
-    "prepublishOnly": "npm run build && npm run test && npm run typecheck"
+    "check:package": "npm run build && publint --strict && attw --pack . && node scripts/check-exports.mjs",
+    "prepublishOnly": "npm run build && npm run test && npm run typecheck && publint --strict && npm_config_dry_run=false attw --pack . && node scripts/check-exports.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
+  "browserslist": [
+    "last 2 Chrome versions",
+    "last 2 Edge versions",
+    "last 2 Firefox versions",
+    "Firefox ESR",
+    "Safari >= 16.4",
+    "iOS >= 16.4"
+  ],
   "keywords": [
     "billkit",
     "checkout",
@@ -56,11 +72,13 @@
     "provenance": true
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
     "@types/node": "^26.1.1",
     "@typescript-eslint/eslint-plugin": "^8.64.0",
     "@typescript-eslint/parser": "^8.20.0",
     "eslint": "^10.7.0",
     "jsdom": "^25.0.1",
+    "publint": "^0.3.25",
     "tsup": "^8.3.5",
     "typescript": "^6.0.3",
     "vitest": "^5.0.1"

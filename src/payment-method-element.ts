@@ -1,8 +1,12 @@
 import { type BaseElementOptions, type BillKitElementHandle, ElementController } from "./iframe";
 
 export interface PaymentMethodElementOptions extends BaseElementOptions {
-  /** The customer whose saved payment methods to render + manage. */
-  customerId: string;
+  /**
+   * Optional, and ignored for authorisation. The `client_secret` already
+   * names the customer, and the element shows that customer's methods
+   * whatever is passed here. Kept so a 0.x mount still compiles.
+   */
+  customerId?: string;
 }
 
 /**
@@ -14,8 +18,7 @@ export interface PaymentMethodElementOptions extends BaseElementOptions {
  * import { mountPaymentMethodElement } from "@billkit-eu/js";
  *
  * const element = mountPaymentMethodElement("#methods", {
- *   clientSecret,          // scoped ephemeral secret
- *   customerId: "cus_123",
+ *   clientSecret,          // scoped ephemeral secret; it names the customer
  *   theme: { colorPrimary: "#6d28d9" },
  * });
  * ```

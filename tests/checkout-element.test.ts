@@ -16,14 +16,18 @@ function getIframe(host: HTMLElement): HTMLIFrameElement {
 /**
  * Intercept the loader's top-window navigation, and hand back the undo.
  *
- * `handleRedirect` calls `(window.top ?? window).location.assign(url)`,
- * so replacing `window.top` with a stand-in whose `location.assign` is a
- * spy captures the navigation without performing it. `window.location`
+ * `handleRedirect` sets `(window.top ?? window).location.href = url`, so
+ * replacing `window.top` with a stand-in whose `location.href` setter is a
+ * spy captures the navigation without performing it. The stand-in's
+ * `assign()` throws a SecurityError, as a cross-origin top window's does
+ * when the merchant's page is itself framed by another origin: of a
+ * cross-origin `Location`, only the `href` setter and `replace()` are
+ * allowed, so a loader that used `assign()` misses the spy. `window.location`
  * itself cannot be stubbed: its members are `[LegacyUnforgeable]` and
  * jsdom refuses the redefinition, which is why the top window is the
  * seam. The `catch` fallback to `window.location` is covered by the
  * logger assertions instead: the "redirecting the top window" debug line
- * sits immediately before the `assign`, on the far side of the guard, so
+ * sits immediately before the navigation, on the far side of the guard, so
  * its absence is proof the guard refused before either branch ran.
  */
 function stubTopNavigation(spy: (url: string) => void): () => void {
@@ -31,7 +35,19 @@ function stubTopNavigation(spy: (url: string) => void): () => void {
   Object.defineProperty(window, "top", {
     configurable: true,
     writable: true,
-    value: { location: { assign: spy } },
+    value: {
+      location: {
+        set href(url: string) {
+          spy(url);
+        },
+        assign() {
+          throw new DOMException(
+            "Blocked a frame from accessing a cross-origin frame.",
+            "SecurityError",
+          );
+        },
+      },
+    },
   });
   return () => {
     Object.defineProperty(window, "top", {
@@ -123,6 +139,53 @@ describe("mountCheckoutElement", () => {
     expect(getIframe(host).src).toBe("https://pay.acme.com/embed");
   });
 
+  it("normalises iframeOrigin to the origin a browser reports, so messages still match", () => {
+    const onReady = vi.fn();
+    mountCheckoutElement("#checkout", {
+      clientSecret: CS,
+      iframeOrigin: "https://Pay.ACME.com:443/some/path/",
+      onReady,
+    });
+    const iframe = getIframe(host);
+    expect(iframe.src).toBe("https://pay.acme.com/embed");
+    const post = vi.spyOn(iframe.contentWindow as Window, "postMessage");
+
+    fromIframe(iframe, { type: "billkit:ready" }, "https://pay.acme.com");
+    fromIframe(iframe, { type: "billkit:loaded", sessionId: CS_SESSION_ID }, "https://pay.acme.com");
+
+    expect(onReady).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0]![1]).toBe("https://pay.acme.com");
+  });
+
+  it.each([
+    "pay.acme.com",
+    "not a url",
+    "javascript:alert(1)",
+    "data:text/html,x",
+    "",
+    // Plain http off loopback would post the client_secret in clear text.
+    "http://pay.acme.com",
+    "http://localhost.evil.example",
+  ])(
+    "refuses the iframeOrigin %j at mount",
+    (iframeOrigin) => {
+      expect(() => mountCheckoutElement("#checkout", { clientSecret: CS, iframeOrigin })).toThrow(
+        /`iframeOrigin` must be an absolute https:\/\/ origin/,
+      );
+      expect(host.querySelector("iframe")).toBeNull();
+    },
+  );
+
+  it.each([
+    ["http://localhost:5173/", "http://localhost:5173"],
+    ["http://checkout.localhost:8080", "http://checkout.localhost:8080"],
+    ["http://127.0.0.1:4000", "http://127.0.0.1:4000"],
+    ["http://[::1]:4000", "http://[::1]:4000"],
+  ])("accepts the loopback http origin %j for local development", (iframeOrigin, origin) => {
+    mountCheckoutElement("#checkout", { clientSecret: CS, iframeOrigin });
+    expect(getIframe(host).src).toBe(`${origin}/embed`);
+  });
+
   it("mounts the payment-method element at /methods", () => {
     mountPaymentMethodElement("#checkout", { clientSecret: CS, customerId: "cus_1" });
     expect(getIframe(host).src).toBe("https://js.billkit.eu/methods");
@@ -158,7 +221,7 @@ describe("mountCheckoutElement", () => {
 
     fromIframe(iframe, { type: "billkit:loaded", sessionId: "cs_1" });
     fromIframe(iframe, { type: "billkit:resize", height: 512 });
-    fromIframe(iframe, { type: "billkit:change", complete: true, method: "creditcard" });
+    fromIframe(iframe, { type: "billkit:change", complete: true, payment_method: "creditcard" });
     fromIframe(iframe, {
       type: "billkit:success",
       sessionId: "cs_1",
@@ -167,7 +230,7 @@ describe("mountCheckoutElement", () => {
 
     expect(onReady).toHaveBeenCalledOnce();
     expect(iframe.style.height).toBe("512px");
-    expect(onChange).toHaveBeenCalledWith({ complete: true, method: "creditcard" });
+    expect(onChange).toHaveBeenCalledWith({ complete: true, payment_method: "creditcard" });
     expect(onSuccess).toHaveBeenCalledWith({ sessionId: "cs_1", paymentStatus: "paid" });
   });
 
@@ -221,6 +284,39 @@ describe("mountCheckoutElement", () => {
       vi.useRealTimers();
     }
   });
+
+  it.each([Number.NaN, "5000" as unknown as number])(
+    "treats loadTimeoutMs %j as unset rather than firing at once",
+    (loadTimeoutMs) => {
+      vi.useFakeTimers();
+      try {
+        const onError = vi.fn();
+        mountCheckoutElement("#checkout", { clientSecret: CS, onError, loadTimeoutMs });
+        vi.advanceTimersByTime(1);
+        expect(onError).not.toHaveBeenCalled();
+        // The default, 20 seconds, still applies.
+        vi.advanceTimersByTime(20_000);
+        expect(onError).toHaveBeenCalledWith(expect.objectContaining({ code: "load_timeout" }));
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([Number.POSITIVE_INFINITY, 2 ** 31])(
+    "treats loadTimeoutMs %s as never, not as now",
+    (loadTimeoutMs) => {
+      vi.useFakeTimers();
+      try {
+        const onError = vi.fn();
+        mountCheckoutElement("#checkout", { clientSecret: CS, onError, loadTimeoutMs });
+        vi.advanceTimersByTime(60_000);
+        expect(onError).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("cancels the load watchdog once the element loads", () => {
     vi.useFakeTimers();
@@ -295,7 +391,7 @@ describe("mountCheckoutElement", () => {
 
     // The tenant flips to dark while the bundle is still downloading.
     handle.updateTheme({ colorScheme: "dark" });
-    // Nothing is posted yet — there is no listener in the frame to hear it.
+    // Nothing is posted yet: there is no listener in the frame to hear it.
     expect(post).not.toHaveBeenCalled();
 
     fromIframe(iframe, { type: "billkit:ready" });
@@ -323,19 +419,23 @@ describe("mountCheckoutElement", () => {
 
   it("fires onError(unsafe_redirect) and never navigates, for every unsafe target", () => {
     // THE invariant. `parseHostMessage` checks the redirect's shape and
-    // nothing more, so the guarantee that only http(s) reaches
-    // `location.assign` rests entirely on `handleRedirect`'s call to
+    // nothing more, so the guarantee that only http(s) reaches the top
+    // window's `location` rests entirely on `handleRedirect`'s call to
     // `isSafeRedirectUrl`. If that call were ever dropped, a
     // `javascript:` URL arriving over postMessage would execute in the
     // MERCHANT's origin, an element-scoped XSS escalated into a
     // same-origin-policy escape onto every page hosting the element.
     //
-    // So this asserts the negative directly: `assign` is never reached.
+    // So this asserts the negative directly: the navigation never happens.
     const unsafe = [
       "javascript:alert(document.domain)",
       "data:text/html,<script>alert(1)</script>",
       "vbscript:msgbox(1)",
       "/relative/path",
+      // Well-formed https, but not the provider: a compromised element
+      // must not be able to send the merchant's buyers to a clone.
+      "https://phish.example/checkout",
+      "http://www.mollie.com/checkout/x",
       "",
     ];
 
@@ -344,8 +444,8 @@ describe("mountCheckoutElement", () => {
       const onRedirect = vi.fn();
       const warn = vi.fn();
       const debug = vi.fn();
-      const assign = vi.fn();
-      const restoreTop = stubTopNavigation(assign);
+      const navigate = vi.fn();
+      const restoreTop = stubTopNavigation(navigate);
 
       try {
         mountCheckoutElement("#checkout", {
@@ -358,10 +458,10 @@ describe("mountCheckoutElement", () => {
 
         fromIframe(iframe, { type: "billkit:redirect", url });
 
-        expect(assign, `navigated to ${JSON.stringify(url)}`).not.toHaveBeenCalled();
+        expect(navigate, `navigated to ${JSON.stringify(url)}`).not.toHaveBeenCalled();
         // Covers the `catch` branch too, which falls back to
         // `window.location` and cannot be stubbed under jsdom: this debug
-        // line is the last statement before either `assign`, so if it
+        // line is the last statement before either navigation, so if it
         // never ran, neither did they.
         expect(debug).not.toHaveBeenCalledWith(
           "BillKit redirecting the top window",
@@ -398,15 +498,15 @@ describe("mountCheckoutElement", () => {
     // The positive half: the guard refuses, it does not refuse
     // everything. Without this the test above would pass against a
     // `handleRedirect` that had stopped navigating altogether.
-    const assign = vi.fn();
-    const restoreTop = stubTopNavigation(assign);
+    const navigate = vi.fn();
+    const restoreTop = stubTopNavigation(navigate);
     try {
       mountCheckoutElement("#checkout", { clientSecret: CS });
       fromIframe(getIframe(host), {
         type: "billkit:redirect",
         url: "https://www.mollie.com/checkout/3ds/x",
       });
-      expect(assign).toHaveBeenCalledWith("https://www.mollie.com/checkout/3ds/x");
+      expect(navigate).toHaveBeenCalledWith("https://www.mollie.com/checkout/3ds/x");
     } finally {
       restoreTop();
     }
@@ -532,5 +632,78 @@ describe("mountCheckoutElement", () => {
 
     fromIframe(iframe, { type: "billkit:success", sessionId: "cs_1", paymentStatus: "paid" });
     expect(onSuccess).not.toHaveBeenCalled();
+  });
+});
+
+describe("the versioned handshake", () => {
+  let host: HTMLDivElement;
+
+  beforeEach(() => {
+    host = document.createElement("div");
+    host.id = "checkout";
+    document.body.appendChild(host);
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+    vi.restoreAllMocks();
+  });
+
+  function readyAndCaptureInit(ready: Record<string, unknown>, logger?: { debug: (m: string, c?: Record<string, unknown>) => void; warn: () => void }) {
+    mountCheckoutElement("#checkout", { clientSecret: CS, ...(logger ? { logger } : {}) });
+    const iframe = getIframe(host);
+    const post = vi.spyOn(iframe.contentWindow as Window, "postMessage");
+    fromIframe(iframe, ready as unknown as HostMessage);
+    return post;
+  }
+
+  it("sends protocol 1 in init", () => {
+    const post = readyAndCaptureInit({ type: "billkit:ready", protocol: 1 });
+    expect(post.mock.calls[0]![0]).toMatchObject({ type: "billkit:init", protocol: 1 });
+  });
+
+  it("still initialises an element that predates the protocol field", () => {
+    // Every element deployment before 1.0 sends a bare ready.
+    const post = readyAndCaptureInit({ type: "billkit:ready" });
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0]![0]).toMatchObject({ type: "billkit:init", protocol: 1 });
+  });
+
+  it("degrades gracefully in front of a newer element: its own protocol, and a debug line", () => {
+    const lines: Array<[string, Record<string, unknown> | undefined]> = [];
+    const post = readyAndCaptureInit(
+      { type: "billkit:ready", protocol: 9 },
+      { debug: (m, c) => lines.push([m, c]), warn: () => undefined },
+    );
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0]![0]).toMatchObject({ type: "billkit:init", protocol: 1 });
+    expect(lines).toContainEqual([
+      "BillKit element speaks a newer protocol; using this loader's",
+      { element: "checkout", elementProtocol: 9, loaderProtocol: 1 },
+    ]);
+  });
+
+  it("does not drop a ready whose protocol is malformed", () => {
+    const post = readyAndCaptureInit({ type: "billkit:ready", protocol: "2" });
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("mountPaymentMethodElement without a customerId", () => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+    vi.restoreAllMocks();
+  });
+
+  it("mounts, and init carries no customerId: the secret names the customer", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    mountPaymentMethodElement(host, { clientSecret: CS });
+    const iframe = getIframe(host);
+    const post = vi.spyOn(iframe.contentWindow as Window, "postMessage");
+    fromIframe(iframe, { type: "billkit:ready", protocol: 1 });
+    const init = post.mock.calls[0]![0] as Record<string, unknown>;
+    expect(init).toMatchObject({ type: "billkit:init", element: "payment-method" });
+    expect("customerId" in init).toBe(false);
   });
 });

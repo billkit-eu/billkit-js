@@ -24,8 +24,21 @@ import type { BillKitThemeTokens } from "./theme";
 /** The single BillKit-hosted origin the element is served from. */
 export const DEFAULT_IFRAME_ORIGIN = "https://js.billkit.eu";
 
-/** Where the iframe calls the confirm/element API by default. */
+/** Where the iframe calls the confirm/element API by default. Internal. */
 export const DEFAULT_API_BASE = "https://api.billkit.eu";
+
+/**
+ * The loader-to-iframe protocol version this loader speaks.
+ *
+ * An integer, carried in `billkit:init` (the loader's version) and in
+ * `billkit:ready` (the iframe's), and bumped only for a change one side
+ * cannot simply ignore. The rule, in DEVELOPMENT.md: the iframe keeps
+ * honouring every protocol a released loader sends, for as long as that
+ * loader can be in a merchant's bundle; a loader that meets a higher
+ * protocol than its own carries on speaking its own. A message without the
+ * field is protocol 0, which is every loader and iframe before 1.0.
+ */
+export const PROTOCOL_VERSION = 1;
 
 /**
  * Which element the iframe should render.
@@ -72,6 +85,8 @@ export type ClientMessage =
       apiBase: string;
       /** Loader version, for iframe-side compatibility checks. */
       loaderVersion: string;
+      /** {@link PROTOCOL_VERSION}. Absent from every loader before 1.0. */
+      protocol: number;
       theme?: BillKitThemeTokens;
       locale?: string;
       /** Only for the payment-method element. */
@@ -94,15 +109,25 @@ export type ClientMessage =
 
 /** Messages the iframe sends OUT to the loader. */
 export type HostMessage =
-  | { type: "billkit:ready" }
+  /**
+   * `protocol` is the highest protocol the iframe speaks; 0 when the iframe
+   * predates the field.
+   */
+  | { type: "billkit:ready"; protocol: number }
   | { type: "billkit:resize"; height: number }
   | { type: "billkit:loaded"; sessionId: string }
-  | { type: "billkit:change"; complete: boolean; method?: string }
+  /**
+   * `payment_method` is the API's name for the chosen method. Elements
+   * before 1.0 sent it as `method`, which {@link parseHostMessage} still
+   * reads when `payment_method` is absent; the element now sends both.
+   */
+  | { type: "billkit:change"; complete: boolean; payment_method?: string }
   /**
    * Hand the top window to the provider (3DS / iDEAL / PayPal).
    *
    * **`url` is UNCHECKED here.** `parseHostMessage` asserts only that it
-   * is a non-empty string; the scheme guard lives at the navigation site,
+   * is a non-empty string; the target guard (https on a Mollie host) lives
+   * at the navigation site,
    * in `ElementController.handleRedirect`, which calls `isSafeRedirectUrl`
    * immediately before `location.assign` and otherwise refuses with
    * `onError({ code: "unsafe_redirect" })`. That single call site is the
@@ -129,25 +154,33 @@ export type HostMessage =
    * human-readable text, already localised by the element. Codes the
    * iframe sends:
    *
-   * - `payment_declined` — the confirm came back with a failed
+   * - `payment_declined`: the confirm came back with a failed
    *   `payment_status` and no redirect. The element keeps its own retry
    *   panel on screen, so treat this as "this attempt is over", not "the
    *   session is dead": re-enable your pay button rather than navigating
    *   away.
    *
    * The loader adds `load_timeout` and `unsafe_redirect` of its own; see
-   * `iframe.ts`. Unknown codes are always possible — a newer element can
-   * mint one — so branch on the ones you handle and fall through to
+   * `iframe.ts`. Unknown codes are always possible (a newer element can
+   * mint one), so branch on the ones you handle and fall through to
    * `message` for the rest.
    */
   | { type: "billkit:error"; message: string; code?: string };
 
 /**
- * The `billkit:error` codes the element itself emits.
+ * Every `code` `onError` can receive from this version of the SDK.
  *
- * - `payment_declined` — the confirm came back unpaid. The element keeps
+ * - `load_timeout` (the loader): the iframe never booted within
+ *   `loadTimeoutMs`. CSP `frame-src`, an ad blocker or the network.
+ * - `unsafe_redirect` (the loader): the element asked for a navigation to a
+ *   target that is not an https URL on a Mollie host, and the loader
+ *   refused it.
+ *
+ * The rest come from the element:
+ *
+ * - `payment_declined`: the confirm came back unpaid. The element keeps
  *   its own retry panel up, so re-enable your button rather than navigate.
- * - `element_crashed` — the element hit an unrecoverable render error and
+ * - `element_crashed`: the element hit an unrecoverable render error and
  *   replaced itself with an error pane. Nothing was charged, and only a
  *   reload recovers it, so re-enable your button and stop waiting.
  * - `no_payment_methods`: nothing the tenant enabled is payable for this
@@ -163,9 +196,37 @@ export type HostMessage =
  * - `missing_client_secret`: the payment-method element was initialised
  *   without a secret at all. Same class: nothing to retry, fix the mount.
  * - `payment_not_open`: the one-shot element was mounted for a one-off
- *   payment that is no longer payable (it expired unpaid, it failed, or it
- *   was already paid). Nothing new was charged; create a fresh one-shot to
- *   take the payment again.
+ *   payment that is no longer payable: it expired unpaid or it failed.
+ *   Nothing was charged; create a fresh one-shot to take the payment again.
+ * - `payment_refunded`: the one-shot was paid and then refunded. Neither a
+ *   success nor "nothing was charged": the money went out and came back.
+ *   Do not create another one-shot on this signal alone.
+ * - `client_secret_expired`: the one-shot's `client_secret` stopped
+ *   working (30 minutes after the create; a confirm does not extend it),
+ *   so the element can no longer show the payment. Its status is unknown
+ *   here: it may have been paid, or be a bank transfer still in flight.
+ *   Retrieve the one-shot server-side (`GET /v1/checkout/one_shot/{id}`)
+ *   or wait for its webhook before creating another, or you risk charging
+ *   the buyer twice.
+ * - `client_secret_invalid`: the API refused the one-shot's
+ *   `client_secret` for any other reason (not a one-shot secret, or one it
+ *   does not know). An integration fault: pass the whole value from the
+ *   create response, unmodified.
+ * - `session_expired`: the checkout session expired, or its
+ *   `client_secret` window closed. Final: create a new session.
+ * - `session_closed`: the checkout session is no longer open for another
+ *   reason (completed elsewhere, or overtaken by a session that bought the
+ *   same thing). Final. Look the session up server-side before creating
+ *   another: it may have been paid.
+ * - `payment_in_progress`: a payment for this checkout is already in
+ *   flight (the buyer came back from 3-D Secure or their bank without
+ *   finishing, or an earlier answer was lost). The element shows the way
+ *   back to it; nothing new was charged. Re-enable your button: a submit
+ *   then continues to that payment's page, or, where it has none, looks
+ *   again and sends `payment_in_progress` again while it is still in flight.
+ * - `request_timeout`: a request to the API got no answer in time. The
+ *   element keeps its retry on offer, after re-reading the session when a
+ *   confirm's outcome is unknown.
  *
  * On the one-shot element `payment_declined` is final: a one-off payment
  * makes at most one provider payment, so the element shows no retry and
@@ -175,13 +236,31 @@ export type HostMessage =
  * on the ones you handle and fall back to `message`.
  */
 export const ELEMENT_ERROR_CODES = [
+  // From the loader itself.
+  "load_timeout",
+  "unsafe_redirect",
+  // From the element.
   "payment_declined",
   "element_crashed",
   "no_payment_methods",
   "missing_session_id",
   "missing_client_secret",
   "payment_not_open",
+  "payment_refunded",
+  "client_secret_expired",
+  "client_secret_invalid",
+  "session_expired",
+  "session_closed",
+  "payment_in_progress",
+  "request_timeout",
 ] as const;
+
+/**
+ * A `code` the SDK knows. `BillKitElementError.code` is wider than this
+ * (`ElementErrorCode | (string & {})`): a newer element can send one this
+ * loader has never seen, and it reaches `onError` verbatim.
+ */
+export type ElementErrorCode = (typeof ELEMENT_ERROR_CODES)[number];
 
 const HOST_MESSAGE_TYPES = new Set<HostMessage["type"]>([
   "billkit:ready",
@@ -193,29 +272,48 @@ const HOST_MESSAGE_TYPES = new Set<HostMessage["type"]>([
   "billkit:error",
 ]);
 
-/** Schemes the loader will hand to `location.assign`. */
-const SAFE_REDIRECT_SCHEMES = new Set(["http:", "https:"]);
+/**
+ * The only host family the element ever sends the buyer to. Every
+ * `billkit:redirect` the element emits carries the payment provider's own
+ * checkout link (`_links.checkout.href`: 3-D Secure, iDEAL, PayPal), which
+ * Mollie serves from `mollie.com`. The merchant's success and cancel pages
+ * are reached by Mollie redirecting back, never by the element.
+ */
+const PROVIDER_HOST = "mollie.com";
 
 /**
- * True when `url` is a same-window-navigable absolute HTTP(S) URL.
+ * True when `url` is an absolute `https` URL on `mollie.com` or one of its
+ * subdomains, with no credentials in it: the only targets the element has a
+ * reason to send the top window to.
  *
  * The loader navigates the **top** window to this value, so a
- * `javascript:` URL would execute in the *merchant's* origin. Since the
- * value arrives over postMessage, honouring it unchecked would turn an
- * XSS confined to the element document (js.billkit.eu) into a
- * same-origin-policy escape onto every page hosting the element. The
- * origin + source checks make that a narrow path, but the check costs
- * nothing and removes the escalation entirely.
+ * `javascript:` URL would execute in the *merchant's* origin, and any other
+ * https URL would let whatever controls the element send the merchant's
+ * buyers somewhere of its choosing. Since the value arrives over
+ * postMessage, honouring it unchecked would turn an XSS confined to the
+ * element document (js.billkit.eu) into a same-origin-policy escape, or a
+ * phishing redirect, on every page hosting the element. The origin +
+ * source checks make that a narrow path, but the check costs nothing and
+ * removes the escalation entirely.
  */
 export function isSafeRedirectUrl(url: unknown): url is string {
   if (typeof url !== "string" || url === "") return false;
   try {
-    return SAFE_REDIRECT_SCHEMES.has(new URL(url).protocol);
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return false;
+    if (parsed.username !== "" || parsed.password !== "") return false;
+    const host = parsed.hostname.toLowerCase();
+    return host === PROVIDER_HOST || host.endsWith(`.${PROVIDER_HOST}`);
   } catch {
     // Relative or malformed. The provider always sends an absolute URL,
     // so anything unparseable is not something to navigate to.
     return false;
   }
+}
+
+/** A protocol number from the wire: a non-negative integer, else 0. */
+export function protocolOf(value: unknown): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 0;
 }
 
 /** Largest iframe height the loader will apply, in CSS pixels. */
@@ -245,7 +343,10 @@ export function parseHostMessage(data: unknown): HostMessage | null {
 
   switch (candidate["type"] as HostMessage["type"]) {
     case "billkit:ready":
-      return { type: "billkit:ready" };
+      // A missing or malformed protocol is not a reason to drop the ready:
+      // that would wedge the handshake. It reads as an iframe that predates
+      // the field.
+      return { type: "billkit:ready", protocol: protocolOf(candidate["protocol"]) };
 
     case "billkit:resize": {
       // Clamped rather than dropped: a bad height should not wedge the
@@ -265,11 +366,16 @@ export function parseHostMessage(data: unknown): HostMessage | null {
 
     case "billkit:change": {
       if (typeof candidate["complete"] !== "boolean") return null;
-      const method = candidate["method"];
+      // `method` is the pre-1.0 element's name for the same field, read
+      // only when `payment_method` is absent.
+      const current = candidate["payment_method"];
+      const legacy = candidate["method"];
+      const paymentMethod =
+        typeof current === "string" ? current : typeof legacy === "string" ? legacy : undefined;
       return {
         type: "billkit:change",
         complete: candidate["complete"],
-        ...(typeof method === "string" ? { method } : {}),
+        ...(paymentMethod !== undefined ? { payment_method: paymentMethod } : {}),
       };
     }
 
