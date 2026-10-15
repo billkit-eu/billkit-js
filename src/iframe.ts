@@ -29,6 +29,18 @@ export interface ChangeEvent {
   payment_method?: string;
 }
 
+/** What `onProcessing` receives. */
+export interface ProcessingEvent {
+  /**
+   * True from the moment a submit passes the form's checks until the
+   * attempt ends: success, a decline or an error. Stays true while the top
+   * window is sent to the bank, since the page is about to go; turns false
+   * if your `onRedirect` takes the navigation over, or if the page is still
+   * here 15 seconds later (a navigation the buyer cancelled).
+   */
+  processing: boolean;
+}
+
 export interface BillKitElementError {
   /** Human-readable, already localised by the element. */
   message: string;
@@ -92,6 +104,25 @@ export interface BaseElementOptions {
   onReady?: () => void;
   /** Fired as the customer edits the form (drives an external pay button). */
   onChange?: (event: ChangeEvent) => void;
+  /**
+   * Fired when a payment starts and when it stops being in flight. Use it to
+   * hold anything that would tear the form down mid-payment, such as the
+   * close button of a modal the element sits in. Every `true` is followed by
+   * a `false` unless the page leaves for the bank: when the attempt ends,
+   * when the element crashes or reloads, when the loader refuses an unsafe
+   * redirect, when `onRedirect` returns false, and when a hand-off has not
+   * left the page after 15 seconds. An element deployed before 1.1 never
+   * fires it, so treat it as a hold to add, never as a gate to wait for.
+   */
+  onProcessing?: (event: ProcessingEvent) => void;
+  /**
+   * Fired when Escape is pressed while focus is inside the element, which
+   * your page cannot hear on its own. Lets a modal close on Escape wherever
+   * focus is. Keys pressed inside the provider's nested card-field frames
+   * are not reported. It fires while a payment is processing too, so check
+   * your own hold before closing.
+   */
+  onEscape?: () => void;
   /**
    * Fired when the payment reaches a terminal success without a redirect.
    * Redirect-based methods (3DS / iDEAL) navigate the top window instead;
@@ -243,6 +274,11 @@ function isLoopbackHost(hostname: string): boolean {
 /** Longest delay `setTimeout` honours; anything above it fires at once. */
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const DEFAULT_LOAD_TIMEOUT_MS = 20_000;
+/**
+ * How long after sending the top window to the bank the page may still be
+ * here before processing is declared over (see `handleRedirect`).
+ */
+const HANDOFF_GRACE_MS = 15_000;
 export class ElementController implements BillKitElementHandle {
   private readonly origin: string;
   private readonly apiBase: string;
@@ -254,6 +290,8 @@ export class ElementController implements BillKitElementHandle {
   private readonly logger: BillKitElementLogger;
   private destroyed = false;
   private ready = false;
+  /** What `onProcessing` last said, so a repeat or a refusal reports only a change. */
+  private processing = false;
   /**
    * The protocol the iframe announced in `billkit:ready` (0 before it
    * announced one). Kept so a later loader can gate a newer message on what
@@ -261,6 +299,8 @@ export class ElementController implements BillKitElementHandle {
    */
   private iframeProtocol = 0;
   private loadTimer: ReturnType<typeof setTimeout> | null = null;
+  /** See `handleRedirect`: ends processing when a hand-off never left the page. */
+  private handoffTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * A `submit()` that arrived before the iframe could hear it.
    *
@@ -466,6 +506,9 @@ export class ElementController implements BillKitElementHandle {
         // error they had just shown. The never-boots case still times out,
         // because it never gets here.
         this.clearLoadTimer();
+        // A second `ready` is the frame reloading, which loses whatever it was
+        // doing: an attempt in flight there will never report its end.
+        if (this.ready) this.setProcessing(false);
         this.ready = true;
         this.logger.debug("BillKit element ready; sending init", {
           element: this.kind,
@@ -491,6 +534,12 @@ export class ElementController implements BillKitElementHandle {
         break;
       case "billkit:redirect":
         this.handleRedirect(message.url);
+        break;
+      case "billkit:processing":
+        this.setProcessing(message.active);
+        break;
+      case "billkit:escape":
+        this.options.onEscape?.();
         break;
       case "billkit:success":
         this.options.onSuccess?.({
@@ -563,6 +612,13 @@ export class ElementController implements BillKitElementHandle {
     }
   }
 
+  /** Report a change of `processing`, once per change. */
+  private setProcessing(processing: boolean): void {
+    if (processing === this.processing) return;
+    this.processing = processing;
+    this.options.onProcessing?.({ processing });
+  }
+
   private handleRedirect(url: string): void {
     // The one guard on this navigation: `parseHostMessage` checks the
     // message's shape only, so a `javascript:` URL, or an https URL on a
@@ -579,6 +635,10 @@ export class ElementController implements BillKitElementHandle {
         message: "Refused to follow an unsafe redirect target.",
         code: "unsafe_redirect",
       });
+      // The element is still showing its hand-off pane and will not say the
+      // attempt is over, because from where it sits the page is leaving.
+      // Nothing is in flight that the host can wait for.
+      this.setProcessing(false);
       return;
     }
     // Let the tenant intercept (return false) before we take over the top
@@ -587,6 +647,11 @@ export class ElementController implements BillKitElementHandle {
     const proceed = this.options.onRedirect?.(url);
     if (proceed === false) {
       this.logger.debug("BillKit redirect deferred to the host page", { element: this.kind });
+      // The host owns the navigation now (a popup, its own state first, or
+      // nothing at all), and the element waits on its hand-off pane with no
+      // way of hearing how it went. Holding the host's modal shut on top of
+      // that would leave it no way out.
+      this.setProcessing(false);
       return;
     }
     // The origin only. The full URL carries provider-side payment
@@ -607,6 +672,24 @@ export class ElementController implements BillKitElementHandle {
       // Top navigation itself refused (a sandboxed frame without
       // `allow-top-navigation`), so navigate the frame we are in instead.
       window.location.assign(url);
+    }
+    // A navigation can be cancelled without a word: the buyer answers a
+    // `beforeunload` prompt with "Stay". The page is still here, the element
+    // still shows its hand-off pane, and nothing will ever end processing.
+    // So if the page has not gone after a while, stop holding the host. A bank
+    // page that is merely slow still loads, since the top window is already
+    // on its way there.
+    this.clearHandoffTimer();
+    this.handoffTimer = setTimeout(() => {
+      this.handoffTimer = null;
+      if (!this.destroyed) this.setProcessing(false);
+    }, HANDOFF_GRACE_MS);
+  }
+
+  private clearHandoffTimer(): void {
+    if (this.handoffTimer !== null) {
+      clearTimeout(this.handoffTimer);
+      this.handoffTimer = null;
     }
   }
 
@@ -669,6 +752,7 @@ export class ElementController implements BillKitElementHandle {
     this.destroyed = true;
     this.logger.debug("BillKit element destroyed", { element: this.kind });
     this.clearLoadTimer();
+    this.clearHandoffTimer();
     window.removeEventListener("message", this.onMessage);
     this.iframe.remove();
   }

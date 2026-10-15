@@ -156,6 +156,8 @@ All three elements take the same base options.
 | `logger` | `BillKitElementLogger` | Opt-in diagnostics. Off by default. |
 | `onReady` | `() => void` | The iframe booted and loaded the session. |
 | `onChange` | `(e: ChangeEvent) => void` | Fires as the customer edits. `e.complete` drives an external pay button. |
+| `onProcessing` | `(e: ProcessingEvent) => void` | `e.processing` is true while a payment is in flight, from the press of Pay until the attempt ends. Hold anything that would tear the form down meanwhile, such as a modal's close button. See [In a modal](#in-a-modal). Since 1.1. |
+| `onEscape` | `() => void` | Escape was pressed inside the element, which your page cannot hear on its own. Since 1.1. |
 | `onSuccess` | `(e: SuccessEvent) => void` | Terminal success with no redirect. |
 | `onError` | `(e: BillKitElementError) => void` | Any element or payment error. See [Error codes](#error-codes). |
 | `onRedirect` | `(url: string) => boolean \| void` | Called before the top window navigates for 3DS or iDEAL. Return `false` to navigate yourself. |
@@ -220,6 +222,27 @@ and the buyer sits on a form whose payment has already been created at the
 provider.
 
 Terminal state for a redirect flow arrives on your server through the `checkout.session.completed` webhook, not in the browser. Treat the redirect back to `success_url` as a UI hint and the webhook as the source of truth.
+
+### In a modal
+
+The bank's own step (3DS, iDEAL, PayPal) never renders inside the element: the top window goes to the bank and comes back to your `success_url`. What a modal has to guard is the stretch before that, from the press of Pay until the attempt ends, when closing the modal tears the form down under a payment that is already on its way.
+
+```ts
+let processing = false;
+const element = mountOneShotPaymentElement("#pay", {
+  clientSecret,
+  onProcessing: (e) => {
+    processing = e.processing;
+    closeButton.disabled = e.processing;
+  },
+  // Escape pressed inside the iframe never reaches your page.
+  onEscape: () => {
+    if (!processing) closeModal();
+  },
+});
+```
+
+Every `processing: true` is followed by a `false` unless the page is leaving for the bank: on success, on a decline or error, when the element crashes or reloads, when the loader refuses an unsafe redirect, when your `onRedirect` returns `false`, and when the page is still here 15 seconds after a hand-off (a navigation the buyer cancelled). `onEscape` fires while processing too, so check your hold before closing, as the example does. An element deployed before 1.1 never fires it, so use it to hold the close, never as something the modal waits for. A reload still ends the page, which is safe: the webhook decides what was paid.
 
 ## Content Security Policy
 

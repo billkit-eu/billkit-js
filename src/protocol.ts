@@ -137,6 +137,15 @@ export type HostMessage =
    */
   | { type: "billkit:redirect"; url: string }
   /**
+   * A payment is, or is no longer, in flight. Sent on each change, never
+   * repeated, routed to `onProcessing`. Added in 1.1: an older element never
+   * sends it, so a host must not wait on it to unlock anything it would
+   * otherwise leave usable.
+   */
+  | { type: "billkit:processing"; active: boolean }
+  /** Escape was pressed inside the element. Routed to `onEscape`. Added in 1.1. */
+  | { type: "billkit:escape" }
+  /**
    * The payment completed without leaving the page.
    *
    * `sessionId` is the id of the object the element was mounted for: the
@@ -268,6 +277,8 @@ const HOST_MESSAGE_TYPES = new Set<HostMessage["type"]>([
   "billkit:loaded",
   "billkit:change",
   "billkit:redirect",
+  "billkit:processing",
+  "billkit:escape",
   "billkit:success",
   "billkit:error",
 ]);
@@ -394,6 +405,14 @@ export function parseHostMessage(data: unknown): HostMessage | null {
       if (typeof candidate["url"] !== "string" || candidate["url"] === "") return null;
       return { type: "billkit:redirect", url: candidate["url"] };
     }
+
+    case "billkit:processing": {
+      if (typeof candidate["active"] !== "boolean") return null;
+      return { type: "billkit:processing", active: candidate["active"] };
+    }
+
+    case "billkit:escape":
+      return { type: "billkit:escape" };
 
     case "billkit:success": {
       if (

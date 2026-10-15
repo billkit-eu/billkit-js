@@ -9,6 +9,24 @@ Versioned independently of the server SDKs. `@billkit-eu/react` tracks this
 package through a peer dependency, so a breaking change here is a breaking
 change there.
 
+## [1.1.0] - 2026-10-15
+
+### Added
+- `onProcessing({ processing })`: true from the press of Pay until the
+  attempt ends, so a host can hold a modal's close while a payment is in
+  flight. Every `true` is followed by a `false` unless the page leaves for
+  the bank, including when the element crashes or reloads, when the loader
+  refuses an unsafe redirect, when `onRedirect` returns `false`, and when
+  the page is still here 15 seconds after a hand-off. Not raised for a payment left pending (a bank
+  transfer), which can stay that way for days.
+- `onEscape()`: Escape pressed inside the element, which the host page
+  cannot hear across the frame.
+- `ProcessingEvent`.
+
+Both ride new `billkit:processing` and `billkit:escape` messages. Additive:
+the protocol stays at 1, an older loader drops them, and an element deployed
+before them never sends them, so neither callback fires there.
+
 ## [1.0.0] - 2026-10-14
 
 The first stable release. From here on the package follows semantic

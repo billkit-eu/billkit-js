@@ -24,6 +24,7 @@ export type {
   BillKitElementError,
   BillKitElementHandle,
   ChangeEvent,
+  ProcessingEvent,
   SuccessEvent,
 } from "./iframe";
 export {

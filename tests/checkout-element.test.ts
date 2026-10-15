@@ -234,6 +234,107 @@ describe("mountCheckoutElement", () => {
     expect(onSuccess).toHaveBeenCalledWith({ sessionId: "cs_1", paymentStatus: "paid" });
   });
 
+  it("routes processing changes to onProcessing, once per change", () => {
+    const onProcessing = vi.fn();
+    mountCheckoutElement("#checkout", { clientSecret: CS, onProcessing });
+    const iframe = getIframe(host);
+
+    fromIframe(iframe, { type: "billkit:processing", active: true });
+    fromIframe(iframe, { type: "billkit:processing", active: true });
+    fromIframe(iframe, { type: "billkit:processing", active: false });
+    // A malformed one is dropped, not read as either answer.
+    fromIframe(iframe, { type: "billkit:processing", active: "yes" } as unknown as HostMessage);
+
+    expect(onProcessing.mock.calls).toEqual([[{ processing: true }], [{ processing: false }]]);
+  });
+
+  it("routes Escape pressed inside the element to onEscape", () => {
+    const onEscape = vi.fn();
+    mountCheckoutElement("#checkout", { clientSecret: CS, onEscape });
+    fromIframe(getIframe(host), { type: "billkit:escape" });
+    expect(onEscape).toHaveBeenCalledOnce();
+  });
+
+  it("ends processing when it refuses an unsafe redirect, since nothing is left to wait for", () => {
+    const onProcessing = vi.fn();
+    const navigate = vi.fn();
+    const restoreTop = stubTopNavigation(navigate);
+    try {
+      mountCheckoutElement("#checkout", { clientSecret: CS, onProcessing, onError: () => {} });
+      const iframe = getIframe(host);
+      fromIframe(iframe, { type: "billkit:processing", active: true });
+      fromIframe(iframe, { type: "billkit:redirect", url: "https://phish.example/checkout" });
+      expect(onProcessing.mock.calls).toEqual([[{ processing: true }], [{ processing: false }]]);
+      expect(navigate).not.toHaveBeenCalled();
+    } finally {
+      restoreTop();
+    }
+  });
+
+  it("ends processing when onRedirect takes the navigation over", () => {
+    // The host owns it now (a popup, or nothing), and the element cannot hear how it went.
+    const onProcessing = vi.fn();
+    mountCheckoutElement("#checkout", {
+      clientSecret: CS,
+      onProcessing,
+      onRedirect: () => false,
+    });
+    const iframe = getIframe(host);
+    fromIframe(iframe, { type: "billkit:processing", active: true });
+    fromIframe(iframe, { type: "billkit:redirect", url: "https://www.mollie.com/3ds/x" });
+    expect(onProcessing.mock.calls).toEqual([[{ processing: true }], [{ processing: false }]]);
+  });
+
+  it("keeps processing on through a hand-off that leaves, and ends it if the page stays", () => {
+    // A `beforeunload` "Stay" cancels the navigation without a word.
+    vi.useFakeTimers();
+    const navigate = vi.fn();
+    const restoreTop = stubTopNavigation(navigate);
+    try {
+      const onProcessing = vi.fn();
+      mountCheckoutElement("#checkout", { clientSecret: CS, onProcessing });
+      const iframe = getIframe(host);
+      fromIframe(iframe, { type: "billkit:processing", active: true });
+      fromIframe(iframe, { type: "billkit:redirect", url: "https://www.mollie.com/3ds/x" });
+      expect(navigate).toHaveBeenCalledOnce();
+      vi.advanceTimersByTime(14_000);
+      expect(onProcessing.mock.calls).toEqual([[{ processing: true }]]);
+      vi.advanceTimersByTime(1_000);
+      expect(onProcessing.mock.calls).toEqual([[{ processing: true }], [{ processing: false }]]);
+    } finally {
+      restoreTop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not report after destroy() when a hand-off timer was pending", () => {
+    vi.useFakeTimers();
+    const restoreTop = stubTopNavigation(vi.fn());
+    try {
+      const onProcessing = vi.fn();
+      const handle = mountCheckoutElement("#checkout", { clientSecret: CS, onProcessing });
+      const iframe = getIframe(host);
+      fromIframe(iframe, { type: "billkit:processing", active: true });
+      fromIframe(iframe, { type: "billkit:redirect", url: "https://www.mollie.com/3ds/x" });
+      handle.destroy();
+      vi.advanceTimersByTime(60_000);
+      expect(onProcessing.mock.calls).toEqual([[{ processing: true }]]);
+    } finally {
+      restoreTop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("ends processing when the frame reloads, since its attempt cannot report any more", () => {
+    const onProcessing = vi.fn();
+    mountCheckoutElement("#checkout", { clientSecret: CS, onProcessing });
+    const iframe = getIframe(host);
+    fromIframe(iframe, { type: "billkit:ready", protocol: 1 });
+    fromIframe(iframe, { type: "billkit:processing", active: true });
+    fromIframe(iframe, { type: "billkit:ready", protocol: 1 });
+    expect(onProcessing.mock.calls).toEqual([[{ processing: true }], [{ processing: false }]]);
+  });
+
   it("lets onRedirect intercept the top-window navigation", () => {
     const onRedirect = vi.fn().mockReturnValue(false);
     mountCheckoutElement("#checkout", { clientSecret: CS, onRedirect });

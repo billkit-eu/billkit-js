@@ -25,6 +25,8 @@ describe("parseHostMessage", () => {
       { type: "billkit:loaded", sessionId: "cs_1" },
       { type: "billkit:change", complete: true },
       { type: "billkit:redirect", url: "https://www.mollie.com/3ds/x" },
+      { type: "billkit:processing", active: false },
+      { type: "billkit:escape" },
       { type: "billkit:success", sessionId: "cs_1", paymentStatus: "paid" },
       { type: "billkit:error", message: "declined" },
     ];
