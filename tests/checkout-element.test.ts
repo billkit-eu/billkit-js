@@ -537,6 +537,8 @@ describe("mountCheckoutElement", () => {
       // must not be able to send the merchant's buyers to a clone.
       "https://phish.example/checkout",
       "http://www.mollie.com/checkout/x",
+      "http://pay.mollie.nl/payment/prepare-authentication/x",
+      "https://evilmollie.nl/x",
       "",
     ];
 

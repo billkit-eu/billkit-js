@@ -184,7 +184,7 @@ All three elements take the same base options.
 | `payment_in_progress` | The checkout element, when a payment for this checkout is already in flight (the buyer came back from 3-D Secure or their bank without finishing, or an earlier answer was lost). | Nothing new was charged. Re-enable your pay button: the element shows the way back to that payment, and a submit continues to it. Where there is no page to go back to, a submit looks again, and `payment_in_progress` arrives again while the payment is still in flight. |
 | `request_timeout` | The element, when a request to the API got no answer in time. | Re-enable your pay button. The element keeps its retry on offer, after re-reading the session when a confirm's outcome is unknown. |
 | `load_timeout` | The loader, when the iframe never booted within `loadTimeoutMs`. | Check CSP `frame-src` and ad blockers; offer the hosted checkout as a fallback. |
-| `unsafe_redirect` | The loader, refusing a redirect target that was not an absolute `https` URL on `mollie.com` or a subdomain of it. | Should never happen in production. Treat it as a security event. |
+| `unsafe_redirect` | The loader, refusing a redirect target that was not an absolute `https` URL on `mollie.com`, `mollie.nl` or a subdomain of either. | Should never happen in production. Treat it as a security event. |
 
 Unknown codes are always possible, because a newer element can mint one, so branch on what you handle and fall through to `message` for the rest.
 
@@ -274,7 +274,7 @@ The fixed iframe origin is the whole design:
 - **The `client_secret` is never in the iframe URL**, in either the query or the fragment. It is delivered over a targeted `postMessage` only after the iframe announces `ready`, which keeps it out of `Referer` headers, browser history and server logs.
 - **Every inbound message is checked** against the exact iframe origin *and* the specific frame that sent it, before the payload is parsed. Messages from another origin, or from a sibling element, are dropped.
 - **Outbound messages always name a target origin.** Never `"*"`.
-- **The iframe is sandboxed** and is not granted `allow-top-navigation`. Redirects are requested by message and performed by the loader only after the URL is validated as an absolute `https` URL on Mollie's own hosts (`mollie.com` and its subdomains), the only place the element sends a buyer (3-D Secure, iDEAL, PayPal). So a compromised element cannot navigate your page to a phishing clone; your own success and cancel pages are reached by Mollie redirecting back, not by the element.
+- **The iframe is sandboxed** and is not granted `allow-top-navigation`. Redirects are requested by message and performed by the loader only after the URL is validated as an absolute `https` URL on Mollie's own domains (`mollie.com`, `mollie.nl` and their subdomains), the only place the element sends a buyer (3-D Secure, iDEAL, PayPal). So a compromised element cannot navigate your page to a phishing clone; your own success and cancel pages are reached by Mollie redirecting back, not by the element.
 
 ## TypeScript
 

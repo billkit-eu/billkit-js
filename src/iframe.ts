@@ -419,7 +419,8 @@ export class ElementController implements BillKitElementHandle {
     // Deliberately absent: `allow-top-navigation`. Redirects travel up as
     // a `billkit:redirect` message and the loader performs them only after
     // `isSafeRedirectUrl` accepts the target, which admits nothing but an
-    // https URL on Mollie's own hosts (`mollie.com` and its subdomains).
+    // https URL on Mollie's own domains (`mollie.com`, `mollie.nl` and their
+    // subdomains).
     // So the frame never steers the top window itself, and a compromised
     // element can send the merchant's page to Mollie's checkout and
     // nowhere else: not to a phishing clone of the merchant.

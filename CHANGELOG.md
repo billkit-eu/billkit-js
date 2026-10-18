@@ -9,6 +9,16 @@ Versioned independently of the server SDKs. `@billkit-eu/react` tracks this
 package through a peer dependency, so a breaking change here is a breaking
 change there.
 
+## [1.1.1] - 2026-10-18
+
+### Fixed
+- Live card payments that need 3-D Secure failed with `unsafe_redirect`
+  ("Refused to follow an unsafe redirect target."). Mollie sends a live
+  card's 3-D Secure step through `pay.mollie.nl`, and the loader only
+  accepted `mollie.com`. Redirects to `mollie.nl` and its subdomains are
+  now followed too; every other host is still refused. Test mode never
+  showed it, because Mollie's simulated pages are on `www.mollie.com`.
+
 ## [1.1.0] - 2026-10-15
 
 ### Added

@@ -126,7 +126,7 @@ export type HostMessage =
    * Hand the top window to the provider (3DS / iDEAL / PayPal).
    *
    * **`url` is UNCHECKED here.** `parseHostMessage` asserts only that it
-   * is a non-empty string; the target guard (https on a Mollie host) lives
+   * is a non-empty string; the target guard (https on a Mollie domain) lives
    * at the navigation site,
    * in `ElementController.handleRedirect`, which calls `isSafeRedirectUrl`
    * immediately before `location.assign` and otherwise refuses with
@@ -284,18 +284,22 @@ const HOST_MESSAGE_TYPES = new Set<HostMessage["type"]>([
 ]);
 
 /**
- * The only host family the element ever sends the buyer to. Every
+ * The only host families the element ever sends the buyer to. Every
  * `billkit:redirect` the element emits carries the payment provider's own
  * checkout link (`_links.checkout.href`: 3-D Secure, iDEAL, PayPal), which
- * Mollie serves from `mollie.com`. The merchant's success and cancel pages
- * are reached by Mollie redirecting back, never by the element.
+ * Mollie serves from both of its domains: test mode's simulated pages from
+ * `www.mollie.com`, and a live card's 3-D Secure hand-off from
+ * `pay.mollie.nl` (`/payment/prepare-authentication/...`), which then sends
+ * the buyer on to their bank. Allowing `mollie.com` alone passed every test
+ * and refused every live 3-D Secure payment. The merchant's success and
+ * cancel pages are reached by Mollie redirecting back, never by the element.
  */
-const PROVIDER_HOST = "mollie.com";
+const PROVIDER_HOSTS = ["mollie.com", "mollie.nl"] as const;
 
 /**
- * True when `url` is an absolute `https` URL on `mollie.com` or one of its
- * subdomains, with no credentials in it: the only targets the element has a
- * reason to send the top window to.
+ * True when `url` is an absolute `https` URL on one of {@link PROVIDER_HOSTS}
+ * or a subdomain of one, with no credentials in it: the only targets the
+ * element has a reason to send the top window to.
  *
  * The loader navigates the **top** window to this value, so a
  * `javascript:` URL would execute in the *merchant's* origin, and any other
@@ -314,7 +318,7 @@ export function isSafeRedirectUrl(url: unknown): url is string {
     if (parsed.protocol !== "https:") return false;
     if (parsed.username !== "" || parsed.password !== "") return false;
     const host = parsed.hostname.toLowerCase();
-    return host === PROVIDER_HOST || host.endsWith(`.${PROVIDER_HOST}`);
+    return PROVIDER_HOSTS.some((provider) => host === provider || host.endsWith(`.${provider}`));
   } catch {
     // Relative or malformed. The provider always sends an absolute URL,
     // so anything unparseable is not something to navigate to.

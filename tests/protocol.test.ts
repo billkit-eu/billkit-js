@@ -188,14 +188,25 @@ describe("parseHostMessage", () => {
 });
 
 describe("isSafeRedirectUrl", () => {
-  it("accepts https on mollie.com and its subdomains only", () => {
+  it("accepts https on mollie.com, mollie.nl and their subdomains only", () => {
     expect(isSafeRedirectUrl("https://www.mollie.com/checkout/x")).toBe(true);
     expect(isSafeRedirectUrl("https://mollie.com/checkout/x")).toBe(true);
     expect(isSafeRedirectUrl("https://pay.Mollie.com/x")).toBe(true);
+    // A live card's 3-D Secure hand-off, verbatim from a live payment's
+    // `_links.checkout.href`. Refused before 1.1.1.
+    expect(
+      isSafeRedirectUrl("https://pay.mollie.nl/payment/prepare-authentication/58055fd11df02e3924a87ad39b7c1191"),
+    ).toBe(true);
+    expect(isSafeRedirectUrl("https://mollie.nl/x")).toBe(true);
     // Not Mollie: a merchant look-alike, a suffix trick, plain http, and
     // credentials smuggled into the authority.
     expect(isSafeRedirectUrl("https://shop.example/return")).toBe(false);
     expect(isSafeRedirectUrl("https://evilmollie.com/x")).toBe(false);
+    expect(isSafeRedirectUrl("https://evilmollie.nl/x")).toBe(false);
+    expect(isSafeRedirectUrl("https://pay.mollie.nl.evil.example/x")).toBe(false);
+    expect(isSafeRedirectUrl("http://pay.mollie.nl/x")).toBe(false);
+    // Other Mollie-looking TLDs are not Mollie's checkout hosts.
+    expect(isSafeRedirectUrl("https://pay.mollie.be/x")).toBe(false);
     expect(isSafeRedirectUrl("https://www.mollie.com.evil.example/x")).toBe(false);
     expect(isSafeRedirectUrl("http://www.mollie.com/checkout/x")).toBe(false);
     expect(isSafeRedirectUrl("http://localhost:3000/return")).toBe(false);
