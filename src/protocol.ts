@@ -196,8 +196,9 @@ export type HostMessage =
  *   session's currency and the buyer's country. The element refuses to
  *   draw a form rather than show one whose `/confirm` would be rejected.
  *   Nothing was charged and a retry changes nothing: send the buyer to a
- *   surface that can take the payment, and check the price's method
- *   allowlist.
+ *   surface that can take the payment, and check the price's
+ *   `payment_methods` (for a price that follows the account, the methods
+ *   switched on in Mollie and not switched off in your account settings).
  * - `missing_session_id`: the loader sent a `client_secret` it could not
  *   parse a session id out of. An integration bug, not a buyer one: check
  *   that the secret is the whole `<sessionId>_secret_…` value from

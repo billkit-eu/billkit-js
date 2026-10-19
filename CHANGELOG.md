@@ -9,6 +9,16 @@ Versioned independently of the server SDKs. `@billkit-eu/react` tracks this
 package through a peer dependency, so a breaking change here is a breaking
 change there.
 
+## [Unreleased]
+
+## [1.1.2] - 2026-10-19
+
+### Changed
+- The `no_payment_methods` guidance now covers a price that follows the
+  account's payment methods (the API default from contract 1.1.0): check
+  the methods switched on in Mollie and not switched off in your account
+  settings, not only the price's own list. Documentation only.
+
 ## [1.1.1] - 2026-10-18
 
 ### Fixed
