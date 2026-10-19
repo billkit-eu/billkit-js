@@ -11,6 +11,24 @@ change there.
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-10-19
+
+### Fixed
+- A `submit()` made before the element has loaded the session (before boot,
+  or during the session fetch) is now queued and flushed once it has, just
+  before `onReady`. It used to be posted right after `init`, or straight
+  away during the fetch, when the element had no form yet and dropped it
+  in silence. An element that errors before loading never flushes it;
+  `onError` has fired and there is nothing to submit.
+- `destroy()` now reports `onProcessing({ processing: false })` when the
+  host had been told a payment was in flight, so a modal holding its close
+  on it is released when the element is torn down mid-payment (the React
+  wrapper remounts on a `locale` or `title` change).
+- The hosted element tells the host a payment is in flight before it sends
+  the "continue to your bank" redirect, so a host that takes over that
+  navigation (`onRedirect` returning `false`) no longer receives a
+  `processing: true` that nothing follows.
+
 ## [1.1.2] - 2026-10-19
 
 ### Changed

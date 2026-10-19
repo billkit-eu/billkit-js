@@ -61,7 +61,8 @@ element.destroy();                                 // remove the iframe, detach 
 ```
 
 `submit()` is safe to call before the element has booted: one pending submit
-is queued and flushed as soon as the handshake completes, so a pay button
+is queued and flushed once the element has loaded the session (as `onReady`
+fires), whether the call came before boot or during the session fetch, so a pay button
 that is clickable the moment your page renders no longer drops the click in
 silence. (The element still decides whether it can act on it; a submit that
 arrives before its session view has loaded is ignored there, and the buyer
@@ -152,7 +153,7 @@ All three elements take the same base options.
 | `title` | `string` | Accessible name for the `<iframe>`. Defaults to "BillKit secure checkout" / "BillKit saved payment methods" / "BillKit secure payment" per element kind. Those defaults are English, and this string lives on **your** page rather than inside the element, so `locale` cannot reach it. Set it when your page is not in English. |
 | `loadTimeoutMs` | `number` | How long to wait for the iframe to boot before firing `onError({ code: "load_timeout" })`. Default `20000`; `0` or `Infinity` disables it. `NaN` or a non-number counts as unset and gets the default. |
 | `iframeOrigin` | `string` | Defaults to `https://js.billkit.eu`. The seam for a BillKit-operated vanity domain. Reduced to its origin (a path or trailing slash is dropped, the host lowercased); a value that is not an absolute https URL throws at mount (plain `http` only for `localhost`, `*.localhost`, `127.0.0.1` or `[::1]`, for local development). |
-| `apiBase` | `string` | API origin the iframe calls. Defaults to `https://api.billkit.eu`. |
+| `apiBase` | `string` | API origin the iframe calls. Defaults to `https://api.billkit.eu`. The hosted element at `js.billkit.eu` is built with its API origin fixed and ignores this; it only takes effect against a self-served element in development. |
 | `logger` | `BillKitElementLogger` | Opt-in diagnostics. Off by default. |
 | `onReady` | `() => void` | The iframe booted and loaded the session. |
 | `onChange` | `(e: ChangeEvent) => void` | Fires as the customer edits. `e.complete` drives an external pay button. |

@@ -307,7 +307,10 @@ describe("mountCheckoutElement", () => {
     }
   });
 
-  it("does not report after destroy() when a hand-off timer was pending", () => {
+  it("ends processing on destroy(), and reports nothing after it", () => {
+    // A host that remounts mid-payment (the React wrapper does, on a
+    // locale change) would otherwise hold its modal shut on a `true`
+    // nothing follows: the frame's own unmount notice has no listener left.
     vi.useFakeTimers();
     const restoreTop = stubTopNavigation(vi.fn());
     try {
@@ -317,8 +320,11 @@ describe("mountCheckoutElement", () => {
       fromIframe(iframe, { type: "billkit:processing", active: true });
       fromIframe(iframe, { type: "billkit:redirect", url: "https://www.mollie.com/3ds/x" });
       handle.destroy();
+      expect(onProcessing.mock.calls).toEqual([[{ processing: true }], [{ processing: false }]]);
+      // The hand-off timer itself is gone, not merely deduplicated.
+      expect(vi.getTimerCount()).toBe(0);
       vi.advanceTimersByTime(60_000);
-      expect(onProcessing.mock.calls).toEqual([[{ processing: true }]]);
+      expect(onProcessing.mock.calls).toHaveLength(2);
     } finally {
       restoreTop();
       vi.useRealTimers();
@@ -647,11 +653,14 @@ describe("mountCheckoutElement", () => {
     expect(getIframe(host).style.display).toBe("block");
   });
 
-  it("queues a submit made before ready and flushes it after init", () => {
+  it("queues a submit made before ready and flushes it once the element has loaded", () => {
     // A merchant's own pay button is clickable the moment their page
     // renders, which can be long before a third-party frame has booted.
     // That submit used to be posted into a frame with no listener and
-    // dropped in silence: the buyer pressed pay and nothing happened.
+    // dropped in silence: the buyer pressed pay and nothing happened. The
+    // first fix flushed it right after `init`, which the element also
+    // drops: it has no form until it has loaded the session. Mutation:
+    // flush in `sendInit` again.
     const debug = vi.fn();
     const handle = mountCheckoutElement("#checkout", { clientSecret: CS, logger: { debug, warn: vi.fn() } });
     const iframe = getIframe(host);
@@ -660,16 +669,40 @@ describe("mountCheckoutElement", () => {
     handle.submit();
     expect(post).not.toHaveBeenCalled();
     expect(debug).toHaveBeenCalledWith(
-      "BillKit queued a submit until the element is ready",
+      "BillKit queued a submit until the element has loaded",
       expect.anything(),
     );
 
     fromIframe(iframe, { type: "billkit:ready" });
 
-    expect(post).toHaveBeenCalledTimes(2);
+    expect(post).toHaveBeenCalledTimes(1);
     expect(post.mock.calls[0]![0]).toMatchObject({ type: "billkit:init" });
+
+    fromIframe(iframe, { type: "billkit:loaded", sessionId: "cs_1" });
+
+    expect(post).toHaveBeenCalledTimes(2);
     expect(post.mock.calls[1]![0]).toEqual({ type: "billkit:submit" });
     expect(post.mock.calls[1]![1]).toBe(DEFAULT_IFRAME_ORIGIN);
+  });
+
+  it("queues a submit made while the element is still loading its session", () => {
+    // The window between `ready` and `loaded` is the network-bound one, and
+    // the element ignores a submit that lands in it. Gating the queue on
+    // `ready` alone posted and dropped exactly that click. Mutation: gate
+    // on `this.ready` in submit().
+    const handle = mountCheckoutElement("#checkout", { clientSecret: CS });
+    const iframe = getIframe(host);
+    const post = vi.spyOn(iframe.contentWindow as Window, "postMessage");
+
+    fromIframe(iframe, { type: "billkit:ready" });
+    handle.submit();
+    expect(post.mock.calls.filter(([m]) => (m as { type: string }).type === "billkit:submit")).toHaveLength(0);
+
+    fromIframe(iframe, { type: "billkit:loaded", sessionId: "cs_1" });
+    expect(post.mock.calls.filter(([m]) => (m as { type: string }).type === "billkit:submit")).toHaveLength(1);
+
+    handle.submit();
+    expect(post.mock.calls.filter(([m]) => (m as { type: string }).type === "billkit:submit")).toHaveLength(2);
   });
 
   it("queues at most one pending submit", () => {
@@ -682,6 +715,7 @@ describe("mountCheckoutElement", () => {
     handle.submit();
     handle.submit();
     fromIframe(iframe, { type: "billkit:ready" });
+    fromIframe(iframe, { type: "billkit:loaded", sessionId: "cs_1" });
 
     const submits = post.mock.calls.filter(
       ([message]) => (message as { type: string }).type === "billkit:submit",

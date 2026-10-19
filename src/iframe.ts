@@ -155,7 +155,9 @@ export interface BillKitElementHandle {
    * Ask the iframe to submit the current form (external pay button).
    *
    * Safe to call before the element has booted: one pending submit is
-   * queued and flushed as soon as the `ready`→`init` handshake completes.
+   * queued and flushed once the element has loaded the session (the
+   * moment `onReady` fires). Not earlier: between `init` and `loaded` the
+   * element has no form yet and ignores a submit.
    */
   submit(): void;
   /**
@@ -290,6 +292,8 @@ export class ElementController implements BillKitElementHandle {
   private readonly logger: BillKitElementLogger;
   private destroyed = false;
   private ready = false;
+  /** The element has loaded its session and can act on a submit. */
+  private loaded = false;
   /** What `onProcessing` last said, so a repeat or a refusal reports only a change. */
   private processing = false;
   /**
@@ -511,6 +515,7 @@ export class ElementController implements BillKitElementHandle {
         // doing: an attempt in flight there will never report its end.
         if (this.ready) this.setProcessing(false);
         this.ready = true;
+        this.loaded = false;
         this.logger.debug("BillKit element ready; sending init", {
           element: this.kind,
           elementProtocol: this.iframeProtocol,
@@ -519,7 +524,9 @@ export class ElementController implements BillKitElementHandle {
         break;
       case "billkit:loaded":
         this.clearLoadTimer();
+        this.loaded = true;
         this.logger.debug("BillKit element loaded", { element: this.kind });
+        this.flushPendingSubmit();
         this.options.onReady?.();
         break;
       case "billkit:resize":
@@ -604,13 +611,22 @@ export class ElementController implements BillKitElementHandle {
       ...(this.options.locale ? { locale: this.options.locale } : {}),
       ...(this.customerId ? { customerId: this.customerId } : {}),
     });
-    if (this.pendingSubmit) {
-      this.pendingSubmit = false;
-      this.logger.debug("BillKit flushing the submit queued before ready", {
-        element: this.kind,
-      });
-      this.post({ type: "billkit:submit" });
-    }
+  }
+
+  /**
+   * Post the submit queued before boot, now that the element can act on
+   * it. Flushed on `loaded`, not after `init`: the element only starts
+   * fetching the session on `init`, and a submit that lands while it is
+   * still loading is dropped in silence, which is the very thing the
+   * queue exists to prevent.
+   */
+  private flushPendingSubmit(): void {
+    if (!this.pendingSubmit) return;
+    this.pendingSubmit = false;
+    this.logger.debug("BillKit flushing the submit queued before the element loaded", {
+      element: this.kind,
+    });
+    this.post({ type: "billkit:submit" });
   }
 
   /** Report a change of `processing`, once per change. */
@@ -697,17 +713,17 @@ export class ElementController implements BillKitElementHandle {
   /**
    * Submit the element's current form.
    *
-   * Before the `ready`→`init` handshake the frame has no listener, so the
-   * message is queued and flushed the moment `init` goes out. The element
-   * still decides whether it can act on it: a submit that reaches it
-   * before its session view has finished loading is ignored there, and the
-   * buyer presses pay again, which is the right outcome, and a long way
-   * from the silent drop this replaces.
+   * Until the element has loaded its session (`billkit:loaded`, the moment
+   * `onReady` fires) it has no form and ignores a submit, and before
+   * `ready` the frame has no listener at all, so a submit made in either
+   * window is queued (one at most) and flushed on `loaded`. An element
+   * that errors before loading never sends `loaded`, so the queued submit
+   * is dropped: `onError` has fired and there is nothing to submit.
    */
   submit(): void {
-    if (!this.ready) {
+    if (!this.loaded) {
       this.pendingSubmit = true;
-      this.logger.debug("BillKit queued a submit until the element is ready", {
+      this.logger.debug("BillKit queued a submit until the element has loaded", {
         element: this.kind,
       });
       return;
@@ -756,5 +772,11 @@ export class ElementController implements BillKitElementHandle {
     this.clearHandoffTimer();
     window.removeEventListener("message", this.onMessage);
     this.iframe.remove();
+    // Last, once nothing can be left behind if the host's handler throws:
+    // a payment the host was told is in flight is over as far as the host
+    // can tell. The frame that would have said so is gone, and its own
+    // unmount notice has no listener left. Without this a modal holding
+    // its close on `processing` stays shut.
+    this.setProcessing(false);
   }
 }
